@@ -309,7 +309,7 @@ export class Bridge {
   }
 
   checkProcess() {
-    const proc = findWowProcess();
+    const proc = findWowProcess(this.config.wowDir);
     const key = processKey(proc);
     const was = this.proc;
     this.proc = proc;

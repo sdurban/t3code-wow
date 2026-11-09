@@ -8,7 +8,7 @@ import path from 'node:path';
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 't3wow-home-'));
 process.env.HOME = home;
 delete process.env.WINEPREFIX;
-const { findWowInstalls } = await import('../src/wow.js');
+const { findWowInstalls, findWindowsWowInstalls, windowsForeverDir } = await import('../src/wow.js');
 
 function touch(p, content = '') {
   fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -22,6 +22,7 @@ function reset() {
 
 const omarchy = () => path.join(home, 'Games/battlenet');
 const linux = { skip: process.platform !== 'linux' && 'requires Linux Wine prefixes' };
+const windows = { skip: process.platform !== 'win32' && 'requires Windows paths' };
 
 test("finds Forever in Omarchy's Battle.net prefix", linux, () => {
   reset();
@@ -59,4 +60,31 @@ test('tells WoW without Forever apart from no WoW at all, and ignores other game
   r = findWowInstalls();
   assert.deepEqual([r.forever.length, r.wowOnly.length], [0, 0]);
   assert.deepEqual(r.prefixes, [omarchy()], 'only prefixes that really hold Battle.net');
+});
+
+test('discovers Windows installs from the running client, Battle.net and standard paths', windows, () => {
+  const data = path.join(home, 'ProgramData');
+  const appData = path.join(home, 'Roaming');
+  const programFiles = path.join(home, 'Program Files');
+  const custom = path.join(home, 'Custom Games', 'WoW');
+  const standard = path.join(programFiles, 'World of Warcraft');
+  const onlyRetail = path.join(home, 'Retail', 'World of Warcraft');
+  const running = path.join(home, 'Running Client', '_forever_');
+  touch(path.join(data, 'Battle.net', 'Agent', 'product.db'),
+    `binary\x00${custom.replaceAll('\\', '/')}\x00other product\x00${onlyRetail}\x00`);
+  touch(path.join(appData, 'Battle.net', 'Battle.net.config'),
+    JSON.stringify({ Client: { Install: { DefaultInstallPath: programFiles } } }));
+  for (const dir of [running, path.join(custom, '_forever_'), path.join(standard, '_forever_')]) {
+    touch(path.join(dir, 'Wow.exe'));
+  }
+  touch(path.join(onlyRetail, '_retail_', 'Wow.exe'));
+
+  const found = findWindowsWowInstalls({
+    ProgramData: data, APPDATA: appData, ProgramFiles: programFiles, ProgramW6432: programFiles,
+  }, [{ wowDir: running }]);
+  assert.deepEqual(found.forever, [running, path.join(custom, '_forever_'), path.join(standard, '_forever_')]);
+  assert.deepEqual(found.wowOnly, [onlyRetail]);
+  assert.deepEqual(found.prefixes, [path.join(data, 'Battle.net')]);
+  assert.equal(windowsForeverDir(path.join(standard, '_forever_', 'Interface', 'AddOns')), path.join(standard, '_forever_'));
+  assert.equal(windowsForeverDir(path.join(onlyRetail, '_retail_', 'Interface', 'AddOns')), null);
 });

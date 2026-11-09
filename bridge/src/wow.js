@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { findWindowsWowProcess } from './windows.js';
+import { findWindowsWowProcesses } from './windows.js';
 
 const FLAVOR = '_forever_';
 // Omarchy's Battle.net installer (omarchy-install-gaming-battlenet) uses this prefix.
@@ -67,8 +67,64 @@ function battlenetWowDirs(root) {
   return dirs;
 }
 
+function realDirKey(dir) {
+  try {
+    return fs.realpathSync.native(dir).toLowerCase();
+  } catch {
+    return path.resolve(dir).toLowerCase();
+  }
+}
+
+export function windowsForeverDir(dir) {
+  let root = path.resolve(dir);
+  if (path.basename(root).toLowerCase() === 'addons' && path.basename(path.dirname(root)).toLowerCase() === 'interface') {
+    root = path.dirname(path.dirname(root));
+  }
+  const forever = path.basename(root).toLowerCase() === FLAVOR ? root : path.join(root, FLAVOR);
+  try {
+    if (fs.statSync(path.join(forever, 'Wow.exe')).isFile()) return forever;
+  } catch {}
+  return null;
+}
+
+export function findWindowsWowInstalls(env = process.env, running = findWindowsWowProcesses()) {
+  const dirs = running.map((p) => p.wowDir);
+  const battleNet = env.ProgramData && path.join(env.ProgramData, 'Battle.net');
+  if (battleNet) {
+    try {
+      const db = fs.readFileSync(path.join(battleNet, 'Agent', 'product.db'), 'utf8');
+      // The launcher stores install paths as strings in its binary product records.
+      for (const [value] of db.matchAll(/[A-Za-z]:[\\/][^\x00-\x1f"<>|?*]{1,512}/g)) dirs.push(value.trim());
+    } catch {}
+  }
+  if (env.APPDATA) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(env.APPDATA, 'Battle.net', 'Battle.net.config'), 'utf8').replace(/^\uFEFF/, ''));
+      const base = cfg?.Client?.Install?.DefaultInstallPath;
+      if (typeof base === 'string' && path.isAbsolute(base)) dirs.push(path.join(base, 'World of Warcraft'));
+    } catch {}
+  }
+  for (const base of [env.ProgramFiles, env['ProgramFiles(x86)'], env.ProgramW6432]) {
+    if (base) dirs.push(path.join(base, 'World of Warcraft'));
+  }
+
+  const found = new Map();
+  const wowOnly = new Set();
+  for (const dir of dirs) {
+    const forever = windowsForeverDir(dir);
+    if (forever) {
+      const key = realDirKey(forever);
+      if (!found.has(key)) found.set(key, forever);
+    } else if (path.basename(dir).toLowerCase() === 'world of warcraft' && fs.existsSync(dir)) {
+      wowOnly.add(dir);
+    }
+  }
+  return { forever: [...found.values()], wowOnly: [...wowOnly], prefixes: battleNet && fs.existsSync(battleNet) ? [battleNet] : [] };
+}
+
 // { forever: [...WoW: Forever folders], wowOnly: [...WoW installs without Forever], prefixes: [...prefixes with Battle.net] }
 export function findWowInstalls() {
+  if (process.platform === 'win32') return findWindowsWowInstalls();
   const forever = [];
   const wowOnly = [];
   const roots = candidateRoots();
@@ -103,8 +159,11 @@ export function addonsDir(wowDir) {
 
 // The running Forever client: { pid, startTicks } or null. The start time
 // distinguishes a restarted client that happens to reuse a pid.
-export function findWowProcess() {
-  if (process.platform === 'win32') return findWindowsWowProcess();
+export function findWowProcess(wowDir) {
+  if (process.platform === 'win32') {
+    const key = typeof wowDir === 'string' && wowDir && realDirKey(wowDir);
+    return findWindowsWowProcesses().find((p) => !key || realDirKey(p.wowDir) === key) || null;
+  }
   let entries;
   try {
     entries = fs.readdirSync('/proc');

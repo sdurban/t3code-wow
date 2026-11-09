@@ -8,25 +8,28 @@ import { createInterface } from 'node:readline';
 const POWERSHELL = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const POWERSHELL_ARGS = ['-NoLogo', '-NoProfile', '-NonInteractive'];
 
-export function findWindowsWowProcess() {
+export function findWindowsWowProcesses() {
   try {
     const script = String.raw`
+      [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
       foreach ($game in (Get-Process -Name Wow -ErrorAction SilentlyContinue)) {
-        if ($game.Path -match '[\\/]_forever_[\\/]Wow\.exe$') {
-          try {
+        try {
+          $exe = $game.Path
+          if ($exe -match '[\\/]_forever_[\\/]Wow\.exe$') {
             $start = ([DateTimeOffset]$game.StartTime).ToUnixTimeMilliseconds()
-            [Console]::WriteLine('{0} {1}', $game.Id, $start)
-            break
-          } catch {}
-        }
+            [Console]::WriteLine('{0} {1} {2}', $game.Id, $start, $exe)
+          }
+        } catch {}
       }`;
     const output = execFileSync(POWERSHELL, [...POWERSHELL_ARGS, '-Command', script], {
       windowsHide: true, encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'],
     });
-    const match = /^(\d+) (\d+)$/.exec(output.trim());
-    if (match) return { pid: Number(match[1]), startTicks: Number(match[2]) };
+    return output.trim().split(/\r?\n/).flatMap((line) => {
+      const match = /^(\d+) (\d+) (.+)$/.exec(line);
+      return match ? [{ pid: Number(match[1]), startTicks: Number(match[2]), wowDir: path.dirname(match[3]) }] : [];
+    });
   } catch {}
-  return null;
+  return [];
 }
 
 export class WindowsCapture {

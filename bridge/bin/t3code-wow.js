@@ -8,7 +8,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Bridge, STATE_DIR, VERSION } from '../src/bridge.js';
 import { CONFIG_DIR, exchangePairingCode, mintToken, readToken, tokenClaims, findT3Cli } from '../src/auth.js';
-import { findWowInstalls, addonsDir as addonsDirOf, findWowProcess } from '../src/wow.js';
+import { findWowInstalls, addonsDir as addonsDirOf, findWowProcess, windowsForeverDir } from '../src/wow.js';
 import { SlotBank, ADDON, CTL_LONG } from '../src/slots.js';
 import { StripCapture } from '../src/capture.js';
 import { decodeImage } from '../src/codec.js';
@@ -74,20 +74,28 @@ function copyDir(src, dst) {
 }
 
 function resolveWowDir(args, cfg) {
+  if (WINDOWS) {
+    if (args.wow) {
+      const dir = windowsForeverDir(String(args.wow));
+      if (dir) return dir;
+      throw new Error('That folder does not contain WoW: Forever. Pass --wow with its game folder or AddOns folder.');
+    }
+    const saved = typeof cfg.wowDir === 'string' && cfg.wowDir && windowsForeverDir(cfg.wowDir);
+    if (saved) return saved;
+    const { forever, wowOnly } = findWowInstalls();
+    if (forever.length === 1) return forever[0];
+    if (forever.length > 1) {
+      throw new Error(`Found several WoW: Forever installations. Pick one with --wow.\n  ${forever.join('\n  ')}`);
+    }
+    const hint = wowOnly.length ? 'Found World of Warcraft without the Forever client. Install WoW: Forever from Battle.net.' : 'Could not find WoW: Forever.';
+    throw new Error(`${hint} Start WoW: Forever or pass --wow with its game folder.`);
+  }
   if (args.wow) {
     const dir = path.resolve(String(args.wow));
-    if (WINDOWS) {
-      const forever = path.basename(dir).toLowerCase() === '_forever_' ? dir : path.join(dir, '_forever_');
-      if (!fs.existsSync(path.join(forever, 'Wow.exe'))) {
-        throw new Error(`couldn't find WoW: Forever at ${forever}. Pass --wow with the game folder.`);
-      }
-      return forever;
-    }
     if (fs.existsSync(path.join(dir, '_forever_'))) return path.join(dir, '_forever_');
     return dir;
   }
   if (cfg.wowDir && fs.existsSync(cfg.wowDir)) return cfg.wowDir;
-  if (WINDOWS) throw new Error('pass --wow with the World of Warcraft or _forever_ folder');
   const { forever, wowOnly, prefixes } = findWowInstalls();
   if (forever.length > 1) console.log(C.y(`Found several WoW: Forever installs, using the first (pick one with --wow):\n  ${forever.join('\n  ')}`));
   if (forever.length) return forever[0];
@@ -99,6 +107,11 @@ function resolveWowDir(args, cfg) {
     throw new Error(`found Battle.net (${prefixes[0]}) but no World of Warcraft. Install WoW: Forever from Battle.net, launch it once, then run ./install.sh again.${where}`);
   }
   throw new Error(`couldn't find Battle.net. On Omarchy, install it with omarchy-install-gaming-battlenet, install WoW: Forever from it and launch it once, then run ./install.sh again.${where}`);
+}
+
+function cmdLocate(args) {
+  if (!WINDOWS) throw new Error('The locate command is for Windows.');
+  console.log(resolveWowDir(args, readConfig()));
 }
 
 // Quiet unless it fails (enabling prints "Created symlink …", which isn't news).
@@ -148,7 +161,7 @@ async function cmdInstall(args) {
   writeConfig(next);
 
   if (WINDOWS) {
-    await firstLaunch({ restart: freshAddon || had < slots || bellsMissing, running: !!findWowProcess(), waiting: false });
+    await firstLaunch({ restart: freshAddon || had < slots || bellsMissing, running: !!findWowProcess(wowDir), waiting: false });
     return;
   }
 
@@ -250,9 +263,7 @@ async function firstLaunch({ restart, running, waiting, since }) {
     }
   }
   const fromHere = WINDOWS
-    ? `  Set T3_ORIGIN and T3_TOKEN for the T3 Code server, then run:
-  node bridge/bin/t3code-wow.js run
-  node bridge/bin/t3code-wow.js status   check the bridge in a separate terminal`
+    ? '  Open T3Code-WoW.cmd to start the bridge or check its status.'
     : `  t3code-wow env add <host>   show threads from another machine (T3 Connect)
   t3code-wow status           what the bridge sees
   rerun the install command   update
@@ -269,7 +280,7 @@ ${fromHere}`);
 
 function cmdSync(args) {
   const cfg = readConfig();
-  const addonsDir = cfg.addonsDir || addonsDirOf(resolveWowDir(args, cfg));
+  const addonsDir = (!WINDOWS && cfg.addonsDir) || addonsDirOf(resolveWowDir(args, cfg));
   // The game only discovers new addon folders and sound files when it starts.
   const freshAddon = !fs.existsSync(path.join(addonsDir, ADDON, `${ADDON}.toc`));
   const dst = syncAddon(addonsDir);
@@ -288,11 +299,15 @@ async function cmdRedeemPairing() {
 
 async function cmdRun(args) {
   const cfg = readConfig();
-  const addonsDir = cfg.addonsDir || addonsDirOf(resolveWowDir(args, cfg));
+  const wowDir = WINDOWS ? resolveWowDir(args, cfg) : cfg.wowDir;
+  const addonsDir = WINDOWS ? addonsDirOf(wowDir) : cfg.addonsDir || addonsDirOf(resolveWowDir(args, cfg));
+  if (WINDOWS && (!fs.existsSync(path.join(addonsDir, ADDON, `${ADDON}.toc`)) || !new SlotBank(addonsDir).installedSlotCount())) {
+    throw new Error('Install T3 Code for WoW with T3Code-WoW.cmd before starting the bridge.');
+  }
   if (WINDOWS && (!process.env.T3_ORIGIN || !process.env.T3_TOKEN)) {
     throw new Error('set T3_ORIGIN and T3_TOKEN for your T3 Code server before starting the Windows bridge');
   }
-  const bridge = new Bridge({ addonsDir, config: { ...cfg, verbose: args.verbose || cfg.verbose } });
+  const bridge = new Bridge({ addonsDir, config: { ...cfg, wowDir, verbose: args.verbose || cfg.verbose } });
   const stop = () => {
     bridge.stop();
     process.exit(0);
@@ -339,7 +354,7 @@ function cmdStatus(args) {
 }
 
 async function cmdProbe() {
-  const proc = findWowProcess();
+  const proc = findWowProcess(readConfig().wowDir);
   const cap = new StripCapture({});
   console.log(`backend: ${cap.resolveBackend()}; WoW pid: ${proc?.pid ?? 'not running'}`);
   let res;
@@ -394,12 +409,14 @@ async function cmdUninstall(args) {
   }
 
   let wowDir = cfg.wowDir;
-  if (!wowDir) {
+  if (WINDOWS) {
+    wowDir = typeof wowDir === 'string' && wowDir && windowsForeverDir(wowDir);
+  } else if (!wowDir) {
     try {
       wowDir = findWowInstalls().forever[0];
     } catch {}
   }
-  const addonsDir = cfg.addonsDir || (wowDir && addonsDirOf(wowDir));
+  const addonsDir = (!WINDOWS && cfg.addonsDir) || (wowDir && addonsDirOf(wowDir));
   if (addonsDir && fs.existsSync(addonsDir)) {
     const n = new SlotBank(addonsDir).removeSlots(0);
     fs.rmSync(path.join(addonsDir, ADDON), { recursive: true, force: true });
@@ -456,7 +473,7 @@ async function cmdUninstall(args) {
     done('Removed the t3code-wow command and its files');
   }
 
-  if (findWowProcess()) console.log(`\nWorld of Warcraft is running: ${C.b('/reload')} or restart it to finish unloading T3 Code.`);
+  if ((!WINDOWS || wowDir) && findWowProcess(wowDir)) console.log(`\nWorld of Warcraft is running: ${C.b('/reload')} or restart it to finish unloading T3 Code.`);
 }
 
 async function cmdEnv(args) {
@@ -551,6 +568,8 @@ function help() {
 
   t3code-wow install [--wow DIR] [--slots N] [--no-service]
                      Install the addon, its live-update slots and the bridge service
+  t3code-wow locate [--wow DIR]
+                     Print the detected WoW: Forever folder on Windows
   t3code-wow status [--log] [--json]
                      Show what the bridge sees
   t3code-wow sync        Re-copy the installed addon into the game (to update, rerun the install command)
@@ -570,12 +589,12 @@ function help() {
 
 const args = parseArgs(process.argv.slice(2));
 const cmd = args._[0];
-const commands = { env: cmdEnv, install: cmdInstall, run: cmdRun, status: cmdStatus, sync: cmdSync, probe: cmdProbe, uninstall: cmdUninstall, 'redeem-pairing': cmdRedeemPairing };
+const commands = { env: cmdEnv, install: cmdInstall, locate: cmdLocate, run: cmdRun, status: cmdStatus, sync: cmdSync, probe: cmdProbe, uninstall: cmdUninstall, 'redeem-pairing': cmdRedeemPairing };
 if (!cmd || args.help || !commands[cmd]) {
   help();
   if (cmd && !commands[cmd]) process.exitCode = 1;
 } else {
-  Promise.resolve(commands[cmd](args)).catch((err) => {
+  Promise.resolve().then(() => commands[cmd](args)).catch((err) => {
     console.error(C.r(`✗ ${err.message}`));
     process.exitCode = 1;
   });
