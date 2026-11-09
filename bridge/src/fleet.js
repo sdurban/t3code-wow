@@ -155,9 +155,9 @@ export class Fleet extends EventEmitter {
     return env.client.sendMessage(id, text, mode, attachments);
   }
 
-  setThreadModel(key, modelSelection) {
+  setThreadModel(key, modelSelection, effort) {
     const { env, id } = this.split(key);
-    return env.client.setThreadModel(id, modelSelection);
+    return env.client.setThreadModel(id, modelSelection, effort);
   }
 
   uploadImage(key, data, name, mime) {

@@ -461,16 +461,53 @@ test('addon model commands update the selection before the next message and can 
     calls.push(['model', ...a]);
     await ready.promise;
   };
-  const change = b.runCommand({ id: 1, verb: 'model', args: ['t1', model.instanceId, model.model] });
+  const change = b.runCommand({ id: 1, verb: 'model', args: ['t1', model.instanceId, model.model, 'high'] });
   const send = b.runCommand({ id: 2, verb: 'send', args: ['t1', 'Hello'] });
   await new Promise((r) => setImmediate(r));
-  assert.deepEqual(calls, [['model', 't1', model]]);
+  assert.deepEqual(calls, [['model', 't1', model, 'high']]);
   ready.resolve();
   await Promise.all([change, send]);
   assert.equal(calls[1][0], 'send');
 
   await b.runCommand({ id: 3, verb: 'new', args: ['p1', 'Hello', model.instanceId, model.model] });
   assert.deepEqual(calls[2], ['new', 'p1', 'Hello', [], { modelSelection: model }]);
+  await b.runCommand({ id: 4, verb: 'new', args: ['p1', 'Hello', '', '', 'low'] });
+  assert.deepEqual(calls[3], ['new', 'p1', 'Hello', [], { effort: 'low' }]);
+});
+
+test('reasoning uses the model descriptor and preserves other options on the same model', async (t) => {
+  const { b } = fakeBridge();
+  t.after(() => b.stop());
+  const client = b.t3.local.client;
+  const effort = { id: 'reasoningEffort', label: 'Reasoning', type: 'select', promptInjectedValues: ['injected'], options: [
+    { id: 'low', label: 'Low' }, { id: 'medium', label: 'Medium', isDefault: true }, { id: 'high', label: 'High' }, { id: 'injected' },
+  ] };
+  const inherited = { instanceId: 'codex', model: 'gpt', options: [{ id: 'fastMode', value: true }] };
+  client.config = {
+    settings: { defaultModelSelection: inherited },
+    providers: [{ instanceId: 'codex', enabled: true, installed: true, models: [{ slug: 'gpt', capabilities: { optionDescriptors: [effort] } }] }],
+  };
+  client.threads.set('effort-thread', { id: 'effort-thread', projectId: 'effort-project', modelSelection: inherited });
+  client.projects.set('effort-project', { id: 'effort-project', title: 'Test project' });
+  b.t3.rebuild(b.t3.local);
+
+  const snapshot = b.buildSnapshot();
+  assert.deepEqual(snapshot.models[0].models[0].effort.choices.map(({ id }) => id), ['low', 'medium', 'high']);
+  assert.equal(snapshot.bridge.eff, 'medium');
+  assert.equal(snapshot.projects.find(({ id }) => id === 'effort-project').eff, 'medium');
+  assert.equal(snapshot.threads.find(({ id }) => id === 'effort-thread').eff, 'medium');
+
+  const writes = [];
+  client.request = async (tag, payload) => writes.push([tag, payload]);
+  await client.setThreadModel('effort-thread', inherited, 'medium');
+  assert.equal(writes.length, 0);
+  await assert.rejects(client.setThreadModel('effort-thread', inherited, 'injected'), /reasoning level is unavailable/);
+  await client.setThreadModel('effort-thread', inherited, 'high');
+  assert.equal(writes[0][1].type, 'thread.model-selection.set');
+  assert.deepEqual(writes[0][1].modelSelection.options, [...inherited.options, { id: effort.id, value: 'high' }]);
+  await client.launchThread('effort-project', 'Hello', [], { effort: 'low' });
+  assert.equal(writes[1][0], 'orchestration.launchThread');
+  assert.deepEqual(writes[1][1].modelSelection.options, [...inherited.options, { id: effort.id, value: 'low' }]);
 });
 
 test('the bridge connects to a configured primary T3 server without a local session', async (t) => {

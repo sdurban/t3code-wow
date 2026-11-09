@@ -84,6 +84,7 @@ function G:Candidates()
 			if ed.kind == "option" and InsideBox(frame, tbox) then add(frame, tbox, ed) end
 		end)
 		add(page.Right.Model)
+		add(page.Right.Effort)
 		add(main.composer)
 		for _, key in ipairs({ "Refresh", "New", "Back", "Stop", "Mic", "Speak", "Shot", "Send" }) do add(f.Bar[key]) end
 	elseif main.page == "settings" then
@@ -240,7 +241,7 @@ local DIRS = {
 -- Explicit routes on the Threads page. Pure geometry gives odd jumps between the
 -- thread list, the conversation and the message box, so those moves are fixed:
 --   list  --Right-->  first answer option if the agent is asking, else message box
---   conversation  Up/Down:  Settle -> options -> agent/model -> message box
+--   conversation  Up/Down:  Settle -> options -> agent/model + reasoning -> message box
 --   box  --Down-->  Send
 --   conversation  --Left-->  the open thread's row in the list
 --   bottom buttons  --Up-->  the list (under it) or the message box
@@ -313,7 +314,7 @@ function G:Zone(cur)
 	local w = cur.w
 	local right = main.frame.Pages.threads.Right
 	if w == ns.ThreadList.dropdown or cur.box == ns.ThreadList.scrollBox then return "list" end
-	if w == main.composer or w == right.Model or w == right.Header.Action or w == right.Header.Archive or w == right.Header.Project or cur.box == ns.Transcript.scrollBox then
+	if w == main.composer or w == right.Model or w == right.Effort or w == right.Header.Action or w == right.Header.Archive or w == right.Header.Project or cur.box == ns.Transcript.scrollBox then
 		return "convo"
 	end
 	for _, key in ipairs({ "Refresh", "New", "Back", "Stop", "Mic", "Speak", "Shot", "Send" }) do
@@ -334,8 +335,16 @@ function G:ExplicitMove(cur, dirKey)
 	end
 
 	if zone == "convo" then
+		if dirKey == "PADDRIGHT" and cur.w == right.Model and Usable(right.Effort) then
+			self:Highlight(right.Effort)
+			return true
+		end
 		if dirKey == "PADDLEFT" then
 			if cur.w == right.Header.Project then return false end
+			if cur.w == right.Effort and Usable(right.Model) then
+				self:Highlight(right.Model)
+				return true
+			end
 			if cur.w == right.Header.Action and Usable(right.Header.Archive) then
 				self:Highlight(right.Header.Archive)
 				return true
@@ -354,7 +363,8 @@ function G:ExplicitMove(cur, dirKey)
 			if main.mode ~= "new" then
 				for _, i in ipairs(OptionIndexes()) do table.insert(seq, { index = i }) end
 			end
-			if Usable(right.Model) then table.insert(seq, { w = right.Model }) end
+			local picker = cur.w == right.Effort and right.Effort or (Usable(right.Model) and right.Model or right.Effort)
+			if Usable(picker) then table.insert(seq, { w = picker }) end
 			table.insert(seq, { w = main.composer })
 			local pos
 			local curIndex = cur.box == ns.Transcript.scrollBox and ns.Transcript.scrollBox:FindElementDataIndex(cur.ed)

@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 import { RS, US } from './codec.js';
 import { StripCapture } from './capture.js';
 import { SlotBank } from './slots.js';
-import { threadStatus, isUnread } from './t3.js';
+import { threadStatus, isUnread, effectiveReasoning } from './t3.js';
 import { Fleet } from './fleet.js';
 import { tokenProvider } from './auth.js';
 import { Voice } from './voice.js';
@@ -43,6 +43,7 @@ function modelFields(client, selection, instanceId = selection?.instanceId) {
   return {
     mi: instanceId,
     m: selection?.model,
+    eff: effectiveReasoning(model, selection),
     mil: instanceId ? wowModelLabel(provider?.displayName || instanceId) : undefined,
     ml: selection?.model ? wowModelLabel(model?.shortName || model?.name || selection.model) : undefined,
   };
@@ -439,7 +440,7 @@ export class Bridge {
   // Commands from the game
 
   async runCommand(cmd) {
-    const [a0, a1, a2, a3] = cmd.args;
+    const [a0, a1, a2, a3, a4] = cmd.args;
     this.log(`command ${cmd.id}: ${cmd.verb} ${cmd.verb === 'send' || cmd.verb === 'new' ? a0 : cmd.args.join(' ').slice(0, 80)}`);
     let ok = true;
     let msg = null;
@@ -468,7 +469,9 @@ export class Bridge {
           break;
         case 'new': {
           const attachments = await this.takeShots('new', a0);
-          const opts = a2 || a3 ? { modelSelection: { instanceId: a2, model: a3 } } : undefined;
+          const opts = a2 || a3 || a4 ? {} : undefined;
+          if (a2 || a3) opts.modelSelection = { instanceId: a2, model: a3 };
+          if (a4) opts.effort = a4;
           const res = await this.t3.launchThread(a0, a1, attachments, opts);
           msg = 'Thread started';
           if (res?.threadId) this.results.push({ id: cmd.id, ok: true, open: res.threadId });
@@ -477,7 +480,7 @@ export class Bridge {
         case 'model': {
           const previous = this.modelChanges.get(a0);
           const change = Promise.resolve(previous).catch(() => {})
-            .then(() => this.t3.setThreadModel(a0, { instanceId: a1, model: a2 }));
+            .then(() => this.t3.setThreadModel(a0, { instanceId: a1, model: a2 }, a3));
           this.modelChanges.set(a0, change);
           try {
             await change;
@@ -734,7 +737,13 @@ export class Bridge {
     const catalogs = t3.envs.map(({ code, client }) => [code, client.modelCatalog().map((p) => ({
       ...p,
       label: wowModelLabel(p.label),
-      models: p.models.map((m) => ({ ...m, label: wowModelLabel(m.label) })),
+      models: p.models.map((m) => ({
+        ...m, label: wowModelLabel(m.label),
+        effort: m.effort && {
+          ...m.effort, label: wowModelLabel(m.effort.label),
+          choices: m.effort.choices.map((choice) => ({ ...choice, label: wowModelLabel(choice.label) })),
+        },
+      })),
     }))]);
     const projects = [];
     const usedProjects = new Set();

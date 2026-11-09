@@ -33,6 +33,15 @@ local function CreateSideTab(f, index, icon, tooltip, page)
 	return tab
 end
 
+local function CreateSelectionDropdown(parent, width, onChange)
+	local dropdown = UI.Dropdown(parent, width, onChange)
+	dropdown.opensUp = true
+	dropdown:RegisterForClicks("LeftButtonUp")
+	dropdown:EnableMouseWheel(false)
+	dropdown:SetMotionScriptsWhileDisabled(true)
+	return dropdown
+end
+
 function M:Create()
 	if self.frame then return self.frame end
 	local f = CreateFrame("Frame", "T3CodeFrame", UIParent, "ButtonFrameTemplate")
@@ -180,7 +189,7 @@ function M:CreateThreadsPage(page)
 	header.Archive:Hide()
 	UI.Tooltip(header.Archive, "Archive", "Hide this thread from the list (it stays in T3 Code's archive).")
 	header.Project = UI.Dropdown(header, 220, function(value)
-		if M.newProject ~= value then M.newModel = nil end
+		if M.newProject ~= value then M.newModel, M.newEffort = nil, nil end
 		M.newProject = value
 		M:Refresh()
 	end)
@@ -203,12 +212,14 @@ function M:CreateThreadsPage(page)
 	local modelLabel = UI.Text(modelRow, "GameFontNormalSmall")
 	modelLabel:SetPoint("LEFT")
 	modelLabel:SetText("Agent & model")
-	right.Model = UI.Dropdown(modelRow, 400, function(value) M:PickModel(value) end)
+	right.Model = CreateSelectionDropdown(modelRow, 400, function(value) M:PickModel(value) end)
 	right.Model:SetPoint("LEFT", modelLabel, "RIGHT", 8, 0)
-	right.Model.opensUp = true
-	right.Model:RegisterForClicks("LeftButtonUp")
-	right.Model:EnableMouseWheel(false)
-	right.Model:SetMotionScriptsWhileDisabled(true)
+	local effortLabel = UI.Text(modelRow, "GameFontNormalSmall")
+	effortLabel:SetPoint("LEFT", right.Model, "RIGHT", 10, 0)
+	effortLabel:SetText("Reasoning")
+	right.EffortLabel = effortLabel
+	right.Effort = CreateSelectionDropdown(modelRow, 124, function(value) M:PickEffort(value) end)
+	right.Effort:SetPoint("LEFT", effortLabel, "RIGHT", 8, 0)
 
 	local box = CreateFrame("Frame", nil, composer, "T3CodeComposerTemplate")
 	box:SetPoint("TOPLEFT", 8, -6)
@@ -396,7 +407,7 @@ function M:StartNewThread(projectId)
 	self:Create()
 	self:SaveDraft()
 	self.mode = "new"
-	self.newModel = nil
+	self.newModel, self.newEffort = nil, nil
 	local filter = ns.db.settings.project
 	self.newProject = projectId or (filter ~= "all" and filter) or ns.db.settings.lastProject
 	if not ns.Store.projectsById[self.newProject or ""] then
@@ -443,6 +454,57 @@ local function SelectionLabel(agent, model)
 	return agent and model and agent .. " · " .. model or model or agent
 end
 
+local function SetPickerContext(picker, context)
+	if picker.context ~= context then
+		local open = UI.ListOpen()
+		if open and open.owner == picker then open:Hide() end
+		picker.context = context
+	end
+end
+
+local function SetPicker(picker, options, key, fallback, enabled, help, changing)
+	picker:SetOptions(options, key)
+	local choice = FindChoice(options, key)
+	picker.Text:SetText((choice and choice.label or fallback) .. (changing and " · changing…" or ""))
+	picker:SetEnabled(enabled)
+	picker.Arrow:SetDesaturated(not enabled)
+	picker.help = help
+	local open = UI.ListOpen()
+	if not enabled and open and open.owner == picker then open:Hide() end
+end
+
+local WAIT_TO_CHANGE = "Wait for the current run or request to finish before changing the agent, model, or reasoning."
+
+function M:RefreshEffortPicker(right, context, selection, busy, pending)
+	local picker = right.Effort
+	local model = ModelKey(selection.agent, selection.model)
+	SetPickerContext(picker, context .. "\031" .. model)
+	picker.selection = selection
+	local change = self.mode == "new" and self.newEffort
+	if change and change.model ~= model then
+		self.newEffort = nil
+		change = nil
+	end
+	local option = selection.option
+	local value = change and change.value or selection.effort or ""
+	local options = {}
+	for _, choice in ipairs(option and option.choices or {}) do
+		table.insert(options, { value = choice.id, label = SafeLabel(choice.label, choice.id) })
+	end
+	if #options > 0 and not selection.effort and self.mode == "new" then
+		table.insert(options, 1, { value = "", label = "Default" })
+	end
+	local shown = #options > 0 or value ~= ""
+	right.EffortLabel:SetShown(shown)
+	picker:SetShown(shown)
+	right.Model:SetWidth(shown and 290 or 400)
+	local fallback = value ~= "" and SafeLabel(nil, value) or "Default"
+	if change then fallback = change.label .. " · unavailable" end
+	local help = busy and WAIT_TO_CHANGE or "Choose how much reasoning this model uses."
+	SetPicker(picker, options, value, fallback, shown and not busy and not pending and #options > 0,
+		help, pending and pending.effort)
+end
+
 function M:RefreshModelPicker(right, thread)
 	local store = ns.Store
 	local new = self.mode == "new"
@@ -458,37 +520,43 @@ function M:RefreshModelPicker(right, thread)
 		right.Composer:SetPoint("BOTTOMRIGHT", -8, 18)
 	end
 	local context = new and "new:" .. (self.newProject or "") or thread and "thread:" .. thread.id
-	if picker.context ~= context then
-		local open = UI.ListOpen()
-		if open and open.owner == picker then open:Hide() end
-		picker.context = context
+	SetPickerContext(picker, context)
+	if not shown then
+		SetPickerContext(right.Effort, nil)
+		return
 	end
-	if not shown then return end
 
 	local agent = source and source.mi
 	local model = source and source.m
+	local effort = source and source.eff
 	local agentLabel, modelLabel = source and source.mil, source and source.ml
 	if project and not project.e and not (agent and model) then
 		local defaults = store.data.bridge
 		agent, model, agentLabel, modelLabel = defaults.mi, defaults.m, defaults.mil, defaults.ml
+		effort = defaults.eff
 	end
 	local catalog = store.data.models or {}
 	if source and source.e then catalog = (store.data.modelsByEnv or {})[source.e] or {} end
 	local busy = not new and thread and (thread.s == "working" or thread.s == "input")
 	local restrictAgent
+	local option
 	for _, entry in ipairs(catalog) do
 		if entry.id == agent then
 			agentLabel = entry.label or agentLabel
 			restrictAgent = not new and not busy and entry.locked
 			for _, item in ipairs(entry.models or {}) do
-				if item.id == model then modelLabel = item.label or modelLabel break end
+				if item.id == model then
+					modelLabel, option = item.label or modelLabel, item.effort
+					break
+				end
 			end
 			break
 		end
 	end
 	local currentLabel = SelectionLabel(SafeLabel(agentLabel, agent), SafeLabel(modelLabel, model))
 	local options = {}
-	local key = ModelKey(agent, model)
+	local baseKey = ModelKey(agent, model)
+	local key = baseKey
 	local fallback = currentLabel or "No model selected"
 	if new then
 		local defaultLabel = currentLabel and "Project default · " .. currentLabel or "Project default"
@@ -504,52 +572,84 @@ function M:RefreshModelPicker(right, thread)
 					table.insert(options, {
 						value = ModelKey(entry.id, item.id),
 						label = SelectionLabel(SafeLabel(entry.label, entry.id), SafeLabel(item.label, item.id)),
-						agent = entry.id, model = item.id,
+						agent = entry.id, model = item.id, option = item.effort,
 					})
 				end
 			end
 		end
 	end
+	local selection = { agent = agent, model = model, option = option, effort = effort }
+	if new and self.newModel and key ~= baseKey then
+		local choice = FindChoice(options, key)
+		selection = { agent = self.newModel.agent, model = self.newModel.model, option = choice and choice.option }
+	end
+	selection.effort = selection.effort or (selection.option and selection.option.default)
 	local pending = not new and self.pendingModels[thread.id]
-	if pending and pending.agent == agent and pending.model == model then
+	if pending and pending.agent == agent and pending.model == model
+		and (not pending.effort or pending.effort == selection.effort) then
 		self.pendingModels[thread.id] = nil
 		pending = nil
 	end
 	local enabled = not pending and #options > (new and key == "" and 1 or 0)
-	picker:SetOptions(options, key)
-	local label = FindChoice(options, key)
-	picker.Text:SetText((label and label.label or fallback) .. (pending and " · changing…" or ""))
-	picker:SetEnabled(enabled)
-	picker.Arrow:SetDesaturated(not enabled)
+	local help
 	if busy then
-		picker.help = "Wait for the current run or request to finish before changing the agent or model."
+		help = WAIT_TO_CHANGE
 	elseif restrictAgent then
-		picker.help = "This thread can only change models within its agent."
+		help = "This thread can only change models within its agent."
 	else
-		picker.help = "Choose the agent and model together."
+		help = "Choose the agent and model together."
 	end
-	local open = UI.ListOpen()
-	if not enabled and open and open.owner == picker then open:Hide() end
+	SetPicker(picker, options, key, fallback, enabled, help, pending and not pending.effort)
+	self:RefreshEffortPicker(right, context, selection, busy, pending)
+end
+
+function M:ChangeThreadSelection(thread, agent, model, effort)
+	if self.pendingModels[thread.id] then return end
+	local id = ns.Transport:Send("model", thread.id, agent, model, effort)
+	local pending = { id = id, agent = agent, model = model, effort = effort }
+	self.pendingModels[thread.id] = pending
+	C_Timer.NewTimer(30, function()
+		if self.pendingModels[thread.id] ~= pending then return end
+		self.pendingModels[thread.id] = nil
+		if ns.viewId == thread.id then self:Refresh() end
+	end)
 end
 
 function M:PickModel(value)
-	local picker = self.frame.Pages.threads.Right.Model
+	local right = self.frame.Pages.threads.Right
+	local picker = right.Model
 	if not picker:IsEnabled() then return end
 	local choice = FindChoice(picker.options, value)
 	if not choice then return end
 	if self.mode == "new" then
+		if value == "" or (self.newModel and self.newModel.value or "") ~= value
+			or (self.newEffort and not FindChoice(right.Effort.options, self.newEffort.value)) then
+			self.newEffort = nil
+		end
 		self.newModel = choice.agent and choice or nil
 	else
 		local thread = ns.Store:Thread(ns.viewId)
-		if not thread or self.pendingModels[thread.id] or ModelKey(thread.mi, thread.m) == value then return end
-		local id = ns.Transport:Send("model", thread.id, choice.agent, choice.model)
-		local pending = { id = id, agent = choice.agent, model = choice.model }
-		self.pendingModels[thread.id] = pending
-		C_Timer.NewTimer(30, function()
-			if self.pendingModels[thread.id] ~= pending then return end
-			self.pendingModels[thread.id] = nil
-			if ns.viewId == thread.id then self:Refresh() end
-		end)
+		if not thread or ModelKey(thread.mi, thread.m) == value then return end
+		self:ChangeThreadSelection(thread, choice.agent, choice.model)
+	end
+	self:Refresh()
+end
+
+function M:PickEffort(value)
+	local picker = self.frame.Pages.threads.Right.Effort
+	if not picker:IsEnabled() then return end
+	local choice = FindChoice(picker.options, value)
+	if not choice then return end
+	local selection = picker.selection
+	local model = ModelKey(selection.agent, selection.model)
+	if model == "" then return end
+	local changed = value ~= "" and value ~= selection.effort
+	if self.mode == "new" then
+		self.newEffort = changed and { model = model, value = value, label = choice.label } or nil
+	elseif changed then
+		local thread = ns.Store:Thread(ns.viewId)
+		if not thread or ModelKey(thread.mi, thread.m) ~= model then return end
+		self:ChangeThreadSelection(thread, selection.agent, selection.model, value)
 	end
 	self:Refresh()
 end
@@ -569,7 +669,18 @@ function M:Send(textOverride)
 	text = strtrim(text)
 	if text == "" then return end
 	local model = self.mode == "new" and self.newModel
-	local extra = model and #model.agent + #model.model + 2 or 0
+	local effort = self.mode == "new" and self.newEffort
+	local right = self.frame.Pages.threads.Right
+	if effort then
+		local selection = right.Effort.selection
+		if not selection or ModelKey(selection.agent, selection.model) ~= effort.model
+			or not FindChoice(right.Effort.options, effort.value) then
+			ns.Print("That reasoning level is unavailable. Choose another level or reselect the model.")
+			return
+		end
+		model = model or selection
+	end
+	local extra = (model and #model.agent + #model.model + 2 or 0) + (effort and #effort.value + 1 or 0)
 	if #text + extra > 2300 then
 		ns.Print("That message is too long to send from the game (max ~2,000 characters).")
 		return
@@ -581,12 +692,11 @@ function M:Send(textOverride)
 		end
 		ns.db.settings.lastProject = self.newProject
 		if model then
-			local picker = self.frame.Pages.threads.Right.Model
-			if not FindChoice(picker.options, model.value) then
+			if self.newModel and not FindChoice(right.Model.options, self.newModel.value) then
 				ns.Print("That model is unavailable. Choose another model or use the project default.")
 				return
 			end
-			self.pendingNew = ns.Transport:Send("new", self.newProject, text, model.agent, model.model)
+			self.pendingNew = ns.Transport:Send("new", self.newProject, text, model.agent, model.model, effort and effort.value or nil)
 		else
 			self.pendingNew = ns.Transport:Send("new", self.newProject, text)
 		end

@@ -89,7 +89,7 @@ C  id  verb  args…                      (one per queued command)
   - `s`: sound signals unavailable
 - Verbs:
   - `send`, `new`, `stop`
-  - `model` changes a thread's agent and model. `new` can also carry an explicit selection.
+  - `model` carries the thread ID, agent ID, model ID and an optional reasoning level. `new` can also carry an explicit selection and reasoning level.
   - `settle`, `unsettle`, `archive`, `read`
   - `approve`, `answer`
   - `speak`, `say`, `hush`, `dictate`

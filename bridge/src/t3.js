@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 export const PROTOCOL = 2;
 
@@ -47,6 +48,51 @@ function selectableProvider(p) {
 
 function selectableModel(m) {
   return m?.slug && !m.isLegacy;
+}
+
+const REASONING_OPTION = /effort|reason|think/i;
+
+function reasoningDescriptor(model) {
+  for (const option of model?.capabilities?.optionDescriptors || []) {
+    if (option?.type !== 'select' || !option.id || !REASONING_OPTION.test(option.id)) continue;
+    const injected = new Set(option.promptInjectedValues || []);
+    const choices = (option.options || []).filter((choice) => choice?.id && !injected.has(choice.id));
+    if (!choices.length) continue;
+    return {
+      id: option.id,
+      label: option.label || 'Reasoning',
+      default: choices.find((choice) => choice.id === option.currentValue)?.id || choices.find((choice) => choice.isDefault)?.id,
+      choices: choices.map((choice) => ({ id: choice.id, label: choice.label || choice.id })),
+    };
+  }
+}
+
+function selectionOptions(selection) {
+  const options = selection?.options;
+  if (Array.isArray(options)) return options.filter((option) => option?.id);
+  return Object.entries(options || {}).map(([id, value]) => ({ id, value }));
+}
+
+export function effectiveReasoning(model, selection) {
+  const descriptor = reasoningDescriptor(model);
+  const options = selectionOptions(selection);
+  const selected = descriptor
+    ? options.find((option) => option.id === descriptor.id)?.value ?? descriptor.default
+    : options.find((option) => REASONING_OPTION.test(option.id) && typeof option.value === 'string')?.value;
+  return typeof selected === 'string' ? selected : undefined;
+}
+
+function withReasoning(selection, model, effort) {
+  if (!effort) return selection;
+  const descriptor = reasoningDescriptor(model);
+  if (!descriptor?.choices.some((choice) => choice.id === effort)) {
+    throw new Error('That reasoning level is unavailable for this model');
+  }
+  if (effectiveReasoning(model, selection) === effort) return selection;
+  return {
+    ...selection,
+    options: [...selectionOptions(selection).filter((option) => option.id !== descriptor.id), { id: descriptor.id, value: effort }],
+  };
 }
 
 function sameModel(a, b) {
@@ -278,7 +324,7 @@ export class T3Client extends EventEmitter {
       const prev = this.threads.get(t.id);
       this.threads.set(t.id, t);
       if (!prev || prev.updatedAt !== t.updatedAt || threadStatus(prev) !== threadStatus(t)
-        || prev.modelSelection?.instanceId !== t.modelSelection?.instanceId || prev.modelSelection?.model !== t.modelSelection?.model) {
+        || !isDeepStrictEqual(prev.modelSelection, t.modelSelection)) {
         this.emit('change', { kind: 'thread', id: t.id, prev, thread: t });
       }
     } else if (item.kind === 'thread.removed') {
@@ -333,16 +379,21 @@ export class T3Client extends EventEmitter {
       id: provider.instanceId,
       label: provider.displayName || provider.instanceId,
       locked: provider.requiresNewThreadForModelChange === true || undefined,
-      models: (provider.models || []).filter(selectableModel).map((model) => ({ id: model.slug, label: model.shortName || model.name || model.slug })),
+      models: (provider.models || []).filter(selectableModel).map((model) => ({
+        id: model.slug, label: model.shortName || model.name || model.slug, effort: reasoningDescriptor(model),
+      })),
     })).filter((provider) => provider.models.length);
   }
 
   validateModelSelection(selection) {
     if (!selection.instanceId || !selection.model) throw new Error('Choose an agent and a model');
     const provider = this.config?.providers?.find((p) => p?.instanceId === selection.instanceId);
-    if (!selectableProvider(provider) || !provider.models?.some((m) => selectableModel(m) && m.slug === selection.model)) {
+    const model = selectableProvider(provider) && provider.models?.find((m) => selectableModel(m)
+      && (m.slug === selection.model || m.aliases?.includes(selection.model)));
+    if (!model) {
       throw new Error('That agent or model is unavailable on this T3 Code machine');
     }
+    return model;
   }
 
   // ---- writes --------------------------------------------------------------
@@ -351,14 +402,18 @@ export class T3Client extends EventEmitter {
     return this.request('orchestration.dispatchCommand', { commandId: randomUUID(), ...command });
   }
 
-  async setThreadModel(threadId, modelSelection) {
+  async setThreadModel(threadId, selection, effort) {
     const thread = this.threads.get(threadId);
     if (!thread) throw new Error('That thread is no longer available');
-    if (sameModel(thread.modelSelection, modelSelection)) return;
-    this.validateModelSelection(modelSelection);
+    const same = sameModel(thread.modelSelection, selection);
+    if (same && !effort) return;
+    const model = this.validateModelSelection(selection);
+    const base = same ? thread.modelSelection : selection;
+    const modelSelection = withReasoning(base, model, effort);
+    if (same && modelSelection === base) return;
     // T3 can detach the live provider session even for a same-agent model change.
     if (thread.activeRunId || thread.activityRunStatus || WORKING.has(thread.status) || thread.pendingRuntimeRequest) {
-      throw new Error('Wait for the current run or request to finish before changing the agent or model');
+      throw new Error('Wait for the current run or request to finish before changing the model selection');
     }
     const instanceId = thread.modelSelection?.instanceId || thread.providerInstanceId;
     const switching = instanceId && instanceId !== modelSelection.instanceId;
@@ -387,14 +442,15 @@ export class T3Client extends EventEmitter {
     });
   }
 
-  // opts: { title, modelSelection, runtimeMode, interactionMode }
+  // opts: { title, modelSelection, effort, runtimeMode, interactionMode }
   launchThread(projectId, text, attachments = [], opts = {}) {
     const settings = this.config?.settings || {};
     const defaultSelection = this.defaultModelSelection(projectId);
     const selected = opts.modelSelection;
-    if (selected) this.validateModelSelection(selected);
-    const modelSelection = selected && !sameModel(selected, defaultSelection) ? selected : defaultSelection;
-    if (!modelSelection) throw new Error('T3 has no default model configured');
+    const base = selected && !sameModel(selected, defaultSelection) ? selected : defaultSelection;
+    if (!base) throw new Error('T3 has no default model configured');
+    const model = selected || opts.effort ? this.validateModelSelection(base) : undefined;
+    const modelSelection = withReasoning(base, model, opts.effort);
     const firstLine = text.split('\n')[0].trim();
     const title = firstLine.length > 60 ? firstLine.slice(0, 57) + '...' : firstLine || 'New thread';
     return this.request('orchestration.launchThread', {
