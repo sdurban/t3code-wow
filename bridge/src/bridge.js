@@ -33,6 +33,21 @@ const sec = (iso) => (iso ? Math.floor(Date.parse(iso) / 1000) : undefined);
 const ACTIVE = new Set(['working', 'input', 'plan']);
 const ORDER = { input: 0, plan: 1, working: 2, failed: 3, open: 4, settled: 5 };
 
+function wowModelLabel(label) {
+  return escapeWow(String(label).replace(/\s+/g, ' ').slice(0, 80));
+}
+
+function modelFields(client, selection, instanceId = selection?.instanceId) {
+  const provider = instanceId && client.config?.providers?.find((p) => p?.instanceId === instanceId);
+  const model = selection?.model && provider?.models?.find((m) => m?.slug === selection.model || m?.aliases?.includes(selection.model));
+  return {
+    mi: instanceId,
+    m: selection?.model,
+    mil: instanceId ? wowModelLabel(provider?.displayName || instanceId) : undefined,
+    ml: selection?.model ? wowModelLabel(model?.shortName || model?.name || selection.model) : undefined,
+  };
+}
+
 export function activityLabel(projection) {
   if (!projection) return null;
   const runId = projection.runs?.at(-1)?.id;
@@ -226,6 +241,7 @@ export class Bridge {
     this.results = [];
     this.omarchyUsage = new OmarchyUsage({ log: this.log, onChange: () => this.markDirty('minor') });
     this.shots = new Map(); // thread key (or 'new') -> screenshots waiting for the next message
+    this.modelChanges = new Map(); // thread key -> pending model change
     this.lastPublishAt = 0;
     this.lastGen = this.persist.gen || 0;
     this.lastDigest = null;
@@ -423,13 +439,15 @@ export class Bridge {
   // Commands from the game
 
   async runCommand(cmd) {
-    const [a0, a1, a2] = cmd.args;
+    const [a0, a1, a2, a3] = cmd.args;
     this.log(`command ${cmd.id}: ${cmd.verb} ${cmd.verb === 'send' || cmd.verb === 'new' ? a0 : cmd.args.join(' ').slice(0, 80)}`);
     let ok = true;
     let msg = null;
     try {
       switch (cmd.verb) {
         case 'send': {
+          const modelChange = this.modelChanges.get(a0);
+          if (modelChange) await modelChange;
           const attachments = await this.takeShots(a0, a0);
           await this.t3.sendMessage(a0, a1, a2 || 'auto', attachments);
           msg = attachments.length ? `Sent with ${attachments.length} screenshot${attachments.length === 1 ? '' : 's'}` : 'Sent';
@@ -450,9 +468,23 @@ export class Bridge {
           break;
         case 'new': {
           const attachments = await this.takeShots('new', a0);
-          const res = await this.t3.launchThread(a0, a1, attachments);
+          const opts = a2 || a3 ? { modelSelection: { instanceId: a2, model: a3 } } : undefined;
+          const res = await this.t3.launchThread(a0, a1, attachments, opts);
           msg = 'Thread started';
           if (res?.threadId) this.results.push({ id: cmd.id, ok: true, open: res.threadId });
+          break;
+        }
+        case 'model': {
+          const previous = this.modelChanges.get(a0);
+          const change = Promise.resolve(previous).catch(() => {})
+            .then(() => this.t3.setThreadModel(a0, { instanceId: a1, model: a2 }));
+          this.modelChanges.set(a0, change);
+          try {
+            await change;
+          } finally {
+            if (this.modelChanges.get(a0) === change) this.modelChanges.delete(a0);
+          }
+          msg = 'Model selection updated';
           break;
         }
         case 'stop':
@@ -698,6 +730,12 @@ export class Bridge {
 
   buildSnapshot() {
     const t3 = this.t3;
+    const primary = t3.local.client;
+    const catalogs = t3.envs.map(({ code, client }) => [code, client.modelCatalog().map((p) => ({
+      ...p,
+      label: wowModelLabel(p.label),
+      models: p.models.map((m) => ({ ...m, label: wowModelLabel(m.label) })),
+    }))]);
     const projects = [];
     const usedProjects = new Set();
     let threads = [...t3.threads.values()]
@@ -730,7 +768,8 @@ export class Bridge {
         st: sec(t.activityRunStartedAt || t.latestRunStartedAt),
         un: s !== 'settled' && isUnread(t) ? true : undefined,
         br: t.branch ? escapeWow(t.branch) : undefined,
-        m: t.modelSelection?.model,
+        ...modelFields(t._env?.client || primary, t.modelSelection, t.modelSelection?.instanceId || t.providerInstanceId),
+        e: t._env?.code || undefined,
         env: t._env && !t._env.local ? escapeWow(t._env.label) : undefined,
         last: last && ACTIVE.has(s) === false && s !== 'settled' ? escapeWow(firstLine(last, 160)) : undefined,
       };
@@ -739,9 +778,12 @@ export class Bridge {
       if (p.archivedAt) continue;
       const remote = p._env && !p._env.local ? p._env.label : null;
       const name = p.title || p.repositoryIdentity?.displayName || 'Project';
+      const client = p._env?.client || primary;
       projects.push({
         id: p.id,
         name: escapeWow(remote ? `${name} · ${remote}` : name),
+        ...modelFields(client, p.defaultModelSelection || client.defaultModelSelection()),
+        e: p._env?.code || undefined,
         env: remote ? escapeWow(remote) : undefined,
         act: usedProjects.has(p.id) || undefined,
       });
@@ -799,10 +841,13 @@ export class Bridge {
         tts: this.voice.describe().tts || undefined,
         dictation: this.voice.describe().dictation || undefined,
         slots: this.bank.slots,
+        ...modelFields(primary, primary.defaultModelSelection()),
         envs: t3.envs.length > 1 ? t3.environments().map((e) => ({ label: escapeWow(e.label), state: e.state, local: e.local, n: e.threads })) : undefined,
       },
       projects,
       threads: list,
+      models: catalogs[0][1].length ? catalogs[0][1] : undefined,
+      modelsByEnv: catalogs.length > 1 ? Object.fromEntries(catalogs.slice(1)) : undefined,
       older: t3.olderSettled || undefined,
       view,
       usage,

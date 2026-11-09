@@ -89,6 +89,7 @@ C  id  verb  args…                      (one per queued command)
   - `s`: sound signals unavailable
 - Verbs:
   - `send`, `new`, `stop`
+  - `model` changes a thread's agent and model. `new` can also carry an explicit selection.
   - `settle`, `unsettle`, `archive`, `read`
   - `approve`, `answer`
   - `speak`, `say`, `hush`, `dictate`
@@ -182,6 +183,7 @@ When few slots remain, intervals stretch 2–4×. When they run out, the addon o
 - **Writes:** `orchestration.dispatchCommand` with `message.dispatch`, `run.interrupt`,
   `runtime-request.respond`, `thread.settle`, `thread.unsettle` and `thread.visit`;
   plus `orchestration.launchThread`.
+- The server config subscription supplies each machine's available agents and models. New threads can pass a `modelSelection` to `orchestration.launchThread`. Existing threads use `thread.model-selection.set` for a model change or `provider.switch` when changing agents.
 
 ## Controller
 

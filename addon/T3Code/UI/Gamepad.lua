@@ -83,6 +83,7 @@ function G:Candidates()
 		tbox:ForEachFrame(function(frame, ed)
 			if ed.kind == "option" and InsideBox(frame, tbox) then add(frame, tbox, ed) end
 		end)
+		add(page.Right.Model)
 		add(main.composer)
 		for _, key in ipairs({ "Refresh", "New", "Back", "Stop", "Mic", "Speak", "Shot", "Send" }) do add(f.Bar[key]) end
 	elseif main.page == "settings" then
@@ -239,7 +240,7 @@ local DIRS = {
 -- Explicit routes on the Threads page. Pure geometry gives odd jumps between the
 -- thread list, the conversation and the message box, so those moves are fixed:
 --   list  --Right-->  first answer option if the agent is asking, else message box
---   conversation  Up/Down:  Settle -> options (in order, scrolled into view) -> box
+--   conversation  Up/Down:  Settle -> options -> agent/model -> message box
 --   box  --Down-->  Send
 --   conversation  --Left-->  the open thread's row in the list
 --   bottom buttons  --Up-->  the list (under it) or the message box
@@ -312,7 +313,7 @@ function G:Zone(cur)
 	local w = cur.w
 	local right = main.frame.Pages.threads.Right
 	if w == ns.ThreadList.dropdown or cur.box == ns.ThreadList.scrollBox then return "list" end
-	if w == main.composer or w == right.Header.Action or w == right.Header.Archive or w == right.Header.Project or cur.box == ns.Transcript.scrollBox then
+	if w == main.composer or w == right.Model or w == right.Header.Action or w == right.Header.Archive or w == right.Header.Project or cur.box == ns.Transcript.scrollBox then
 		return "convo"
 	end
 	for _, key in ipairs({ "Refresh", "New", "Back", "Stop", "Mic", "Speak", "Shot", "Send" }) do
@@ -353,6 +354,7 @@ function G:ExplicitMove(cur, dirKey)
 			if main.mode ~= "new" then
 				for _, i in ipairs(OptionIndexes()) do table.insert(seq, { index = i }) end
 			end
+			if Usable(right.Model) then table.insert(seq, { w = right.Model }) end
 			table.insert(seq, { w = main.composer })
 			local pos
 			local curIndex = cur.box == ns.Transcript.scrollBox and ns.Transcript.scrollBox:FindElementDataIndex(cur.ed)

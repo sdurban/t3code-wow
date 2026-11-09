@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { Bridge, friendlyError, parseFrame, activityLabel, pendingRequest, runSummary, proposedPlan } from '../src/bridge.js';
 import { SlotBank } from '../src/slots.js';
+import { T3Client } from '../src/t3.js';
 import { luaValue } from '../src/luaser.js';
 import { markdownToWow, markdownToSpeech } from '../src/format.js';
 import { RS, US } from '../src/codec.js';
@@ -377,7 +378,6 @@ test('slot manifests are identical and keep the live data out of addon-manager f
 });
 
 test('reopening a settled thread sends the reason T3 Code requires', async () => {
-  const { T3Client } = await import('../src/t3.js');
   const c = new T3Client({ tokenProvider: async () => 'x' });
   const sent = [];
   c.request = async (tag, payload) => sent.push([tag, payload]);
@@ -385,6 +385,92 @@ test('reopening a settled thread sends the reason T3 Code requires', async () =>
   assert.equal(sent[0][0], 'orchestration.dispatchCommand');
   assert.equal(sent[0][1].type, 'thread.unsettle');
   assert.equal(sent[0][1].reason, 'user');
+});
+
+test('model selection uses the thread or project machine and preserves an unchanged default', async (t) => {
+  const { b } = fakeBridge();
+  t.after(() => b.stop());
+  const local = b.t3.local.client;
+  const remote = { code: 'e1', label: 'remote', client: new T3Client({ tokenProvider: async () => 'x' }) };
+  b.t3.envs.push(remote);
+
+  const inherited = { instanceId: 'codex', model: 'gpt', options: [{ id: 'effort', value: 'high' }] };
+  local.onConfig({ type: 'snapshot', config: {
+    settings: { defaultModelSelection: inherited },
+    providers: [{ instanceId: 'codex', displayName: 'Codex | work', enabled: true, installed: true, models: [{ slug: 'gpt', name: 'GPT' }] }],
+  } });
+  remote.client.onConfig({ type: 'snapshot', config: {
+    settings: { defaultModelSelection: { instanceId: 'claude', model: 'sonnet' } },
+    providers: [
+      { instanceId: 'claude', enabled: true, installed: true, models: [{ slug: 'sonnet', name: 'Sonnet' }, { slug: 'opus', name: 'Opus' }, { slug: 'retired', isLegacy: true }] },
+      { instanceId: 'proxy', enabled: true, installed: true, models: [{ slug: 'code', name: 'Proxy Code' }] },
+      { instanceId: 'disabled', enabled: false, installed: true, models: [{ slug: 'disabled', name: 'Disabled' }] },
+    ],
+  } });
+  const thread = { id: 't2', projectId: 'p2', modelSelection: { instanceId: 'claude', model: 'sonnet' } };
+  const project = { id: 'p2', title: 'Remote project' };
+  remote.client.threads.set(thread.id, thread);
+  remote.client.projects.set(project.id, project);
+  b.t3.rebuild(remote);
+
+  const snapshot = b.buildSnapshot();
+  assert.equal(snapshot.models[0].label, 'Codex || work');
+  assert.deepEqual(snapshot.modelsByEnv.e1.map((p) => [p.id, p.models.map((m) => m.id)]), [
+    ['claude', ['sonnet', 'opus']], ['proxy', ['code']],
+  ]);
+  const entry = snapshot.threads.find((x) => x.id === 'e1~t2');
+  assert.deepEqual([entry.e, entry.mi, entry.m, entry.ml], ['e1', 'claude', 'sonnet', 'Sonnet']);
+  const remoteProject = snapshot.projects.find((x) => x.id === 'e1~p2');
+  assert.deepEqual([remoteProject.e, remoteProject.mi, remoteProject.m], ['e1', 'claude', 'sonnet']);
+
+  const writes = [];
+  remote.client.request = async (tag, payload) => writes.push([tag, payload]);
+  local.request = async (tag, payload) => writes.push([tag, payload]);
+  await assert.rejects(b.t3.setThreadModel('e1~t2', inherited), /unavailable on this T3 Code machine/);
+  await b.t3.setThreadModel('e1~t2', thread.modelSelection);
+  assert.equal(writes.length, 0);
+  await b.t3.setThreadModel('e1~t2', { instanceId: 'claude', model: 'opus' });
+  assert.equal(writes[0][1].type, 'thread.model-selection.set');
+  assert.equal(writes[0][1].threadId, 't2');
+  thread.activeRunId = 'run';
+  await b.t3.setThreadModel('e1~t2', thread.modelSelection);
+  await assert.rejects(b.t3.setThreadModel('e1~t2', { instanceId: 'claude', model: 'opus' }), /finish before changing/);
+  await assert.rejects(b.t3.setThreadModel('e1~t2', { instanceId: 'proxy', model: 'code' }), /finish before changing/);
+  thread.activeRunId = null;
+  thread.pendingRuntimeRequest = { kind: 'user_input' };
+  await assert.rejects(b.t3.setThreadModel('e1~t2', { instanceId: 'claude', model: 'opus' }), /finish before changing/);
+  thread.pendingRuntimeRequest = null;
+  remote.client.config.providers[0].requiresNewThreadForModelChange = true;
+  await assert.rejects(b.t3.setThreadModel('e1~t2', { instanceId: 'proxy', model: 'code' }), /Start a new thread/);
+  remote.client.config.providers[0].requiresNewThreadForModelChange = false;
+  await b.t3.setThreadModel('e1~t2', { instanceId: 'proxy', model: 'code' });
+  assert.equal(writes[1][1].type, 'provider.switch');
+
+  await local.launchThread('p1', 'Hello', [], { modelSelection: { instanceId: 'codex', model: 'gpt' } });
+  assert.deepEqual(writes[2][1].modelSelection, inherited);
+  await remote.client.launchThread('p2', 'Hello', [], { modelSelection: { instanceId: 'proxy', model: 'code' } });
+  assert.deepEqual(writes[3][1].modelSelection, { instanceId: 'proxy', model: 'code' });
+});
+
+test('addon model commands update the selection before the next message and can override a new thread', async (t) => {
+  const { b, calls } = fakeBridge();
+  t.after(() => b.stop());
+  const model = { instanceId: 'claude', model: 'opus' };
+  const ready = Promise.withResolvers();
+  b.t3.setThreadModel = async (...a) => {
+    calls.push(['model', ...a]);
+    await ready.promise;
+  };
+  const change = b.runCommand({ id: 1, verb: 'model', args: ['t1', model.instanceId, model.model] });
+  const send = b.runCommand({ id: 2, verb: 'send', args: ['t1', 'Hello'] });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(calls, [['model', 't1', model]]);
+  ready.resolve();
+  await Promise.all([change, send]);
+  assert.equal(calls[1][0], 'send');
+
+  await b.runCommand({ id: 3, verb: 'new', args: ['p1', 'Hello', model.instanceId, model.model] });
+  assert.deepEqual(calls[2], ['new', 'p1', 'Hello', [], { modelSelection: model }]);
 });
 
 test('the bridge connects to a configured primary T3 server without a local session', async (t) => {

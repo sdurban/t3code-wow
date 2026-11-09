@@ -275,8 +275,8 @@ function T:Elements()
 	local list = {}
 	local main = ns.Main
 	if main.mode == "new" then
-		table.insert(list, Note(ns.Color("gold", "Start a new thread") .. "\n\nPick the project above, describe the task in the box below and press "
-			.. ns.Color("white", "Start") .. ". The agent runs on your computer with your T3 Code defaults.", "common-icon-forwardarrow"))
+		table.insert(list, Note(ns.Color("gold", "Start a new thread") .. "\n\nPick a project above. Choose an agent and model or keep the project default, then describe the task and press "
+			.. ns.Color("white", "Start") .. ".", "common-icon-forwardarrow"))
 		return list
 	end
 	local id = ns.viewId

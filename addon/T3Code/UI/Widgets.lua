@@ -100,7 +100,7 @@ function UI.Cycler(parent, width, onChange)
 	end
 	function b:Step(delta)
 		local n = #self.options
-		if n == 0 then return end
+		if n == 0 or not self:IsEnabled() then return end
 		local current = 0
 		for i, o in ipairs(self.options) do if o.value == self.value then current = i end end
 		local nextIndex = ((current - 1 + delta) % n) + 1
@@ -113,7 +113,7 @@ function UI.Cycler(parent, width, onChange)
 	b:SetScript("OnClick", function(self, button) self:Step(button == "RightButton" and -1 or 1) end)
 	b:EnableMouseWheel(true)
 	b:SetScript("OnMouseWheel", function(self, delta) self:Step(delta > 0 and -1 or 1) end)
-	UI.Tooltip(b, function(self) return self.Text:GetText() end, "Click to choose. Scroll to step through.")
+	UI.Tooltip(b, function(self) return self.Text:GetText() end, function(self) return self.help or "Click to choose. Scroll to step through." end)
 	return b
 end
 
@@ -232,7 +232,7 @@ function UI.PickFromList(value)
 	local l = EnsureList()
 	local owner = l.owner
 	l:Hide()
-	if not owner then return end
+	if not owner or not owner:IsEnabled() then return end
 	owner.value = value
 	owner:Update()
 	PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
@@ -247,7 +247,11 @@ function UI.OpenList(owner)
 	end
 	l.owner = owner
 	l:ClearAllPoints()
-	l:SetPoint("TOPLEFT", owner, "BOTTOMLEFT", 0, -2)
+	if owner.opensUp then
+		l:SetPoint("BOTTOMLEFT", owner, "TOPLEFT", 0, 2)
+	else
+		l:SetPoint("TOPLEFT", owner, "BOTTOMLEFT", 0, -2)
+	end
 	l:Show()
 	l.Search:SetText("")
 	UI.RefreshList()

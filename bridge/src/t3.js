@@ -41,6 +41,18 @@ export function normalizeT3Origin(value) {
 
 const WORKING = new Set(['preparing', 'queued', 'starting', 'running', 'waiting']);
 
+function selectableProvider(p) {
+  return p?.instanceId && p.enabled && p.installed && p.availability !== 'unavailable' && p.supportsTextGeneration !== false;
+}
+
+function selectableModel(m) {
+  return m?.slug && !m.isLegacy;
+}
+
+function sameModel(a, b) {
+  return !!a?.instanceId && !!a.model && a.instanceId === b?.instanceId && a.model === b?.model;
+}
+
 // Collapse the server's thread fields into the handful the game needs.
 export function threadStatus(t) {
   if (t.archivedAt || t.deletedAt) return 'archived';
@@ -265,7 +277,8 @@ export class T3Client extends EventEmitter {
       if (!t || t.lineage?.parentThreadId) return;
       const prev = this.threads.get(t.id);
       this.threads.set(t.id, t);
-      if (!prev || prev.updatedAt !== t.updatedAt || threadStatus(prev) !== threadStatus(t)) {
+      if (!prev || prev.updatedAt !== t.updatedAt || threadStatus(prev) !== threadStatus(t)
+        || prev.modelSelection?.instanceId !== t.modelSelection?.instanceId || prev.modelSelection?.model !== t.modelSelection?.model) {
         this.emit('change', { kind: 'thread', id: t.id, prev, thread: t });
       }
     } else if (item.kind === 'thread.removed') {
@@ -287,10 +300,11 @@ export class T3Client extends EventEmitter {
       this.config = item.config;
     } else if (this.config && item.config) {
       this.config = { ...this.config, ...item.config };
-    } else if (this.config && item.providers) {
-      this.config.providers = item.providers;
-    } else if (this.config && item.payload?.providers) {
-      this.config.providers = item.payload.providers;
+    } else if (this.config) {
+      const providers = item.providers || item.payload?.providers;
+      const settings = item.payload?.settings;
+      if (providers) this.config.providers = providers;
+      if (settings) this.config.settings = settings;
     }
     this.emit('config');
   }
@@ -310,10 +324,49 @@ export class T3Client extends EventEmitter {
     return this.http(`/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`).then((d) => d.projection);
   }
 
+  defaultModelSelection(projectId) {
+    return this.projects.get(projectId)?.defaultModelSelection || this.config?.settings?.defaultModelSelection;
+  }
+
+  modelCatalog() {
+    return (this.config?.providers || []).filter(selectableProvider).map((provider) => ({
+      id: provider.instanceId,
+      label: provider.displayName || provider.instanceId,
+      locked: provider.requiresNewThreadForModelChange === true || undefined,
+      models: (provider.models || []).filter(selectableModel).map((model) => ({ id: model.slug, label: model.shortName || model.name || model.slug })),
+    })).filter((provider) => provider.models.length);
+  }
+
+  validateModelSelection(selection) {
+    if (!selection.instanceId || !selection.model) throw new Error('Choose an agent and a model');
+    const provider = this.config?.providers?.find((p) => p?.instanceId === selection.instanceId);
+    if (!selectableProvider(provider) || !provider.models?.some((m) => selectableModel(m) && m.slug === selection.model)) {
+      throw new Error('That agent or model is unavailable on this T3 Code machine');
+    }
+  }
+
   // ---- writes --------------------------------------------------------------
 
   dispatch(command) {
     return this.request('orchestration.dispatchCommand', { commandId: randomUUID(), ...command });
+  }
+
+  async setThreadModel(threadId, modelSelection) {
+    const thread = this.threads.get(threadId);
+    if (!thread) throw new Error('That thread is no longer available');
+    if (sameModel(thread.modelSelection, modelSelection)) return;
+    this.validateModelSelection(modelSelection);
+    // T3 can detach the live provider session even for a same-agent model change.
+    if (thread.activeRunId || thread.activityRunStatus || WORKING.has(thread.status) || thread.pendingRuntimeRequest) {
+      throw new Error('Wait for the current run or request to finish before changing the agent or model');
+    }
+    const instanceId = thread.modelSelection?.instanceId || thread.providerInstanceId;
+    const switching = instanceId && instanceId !== modelSelection.instanceId;
+    if (switching) {
+      const current = this.config?.providers?.find((p) => p?.instanceId === instanceId);
+      if (current?.requiresNewThreadForModelChange) throw new Error('Start a new thread to switch from this agent');
+    }
+    return this.dispatch({ type: switching ? 'provider.switch' : 'thread.model-selection.set', threadId, modelSelection });
   }
 
   sendMessage(threadId, text, mode = 'auto', attachments = []) {
@@ -334,11 +387,13 @@ export class T3Client extends EventEmitter {
     });
   }
 
-  // opts: { title, runtimeMode ('full-access' | 'approval-required' | ...), interactionMode ('default' | 'plan') }
+  // opts: { title, modelSelection, runtimeMode, interactionMode }
   launchThread(projectId, text, attachments = [], opts = {}) {
     const settings = this.config?.settings || {};
-    const project = this.projects.get(projectId);
-    const modelSelection = project?.defaultModelSelection || settings.defaultModelSelection;
+    const defaultSelection = this.defaultModelSelection(projectId);
+    const selected = opts.modelSelection;
+    if (selected) this.validateModelSelection(selected);
+    const modelSelection = selected && !sameModel(selected, defaultSelection) ? selected : defaultSelection;
     if (!modelSelection) throw new Error('T3 has no default model configured');
     const firstLine = text.split('\n')[0].trim();
     const title = firstLine.length > 60 ? firstLine.slice(0, 57) + '...' : firstLine || 'New thread';
