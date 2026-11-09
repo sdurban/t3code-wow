@@ -3,12 +3,12 @@
 Watch and run your [T3 Code](https://t3.codes) agent threads without leaving the game. It's a native addon for World of Warcraft: Forever, built from Blizzard's own UI templates so it looks and plays like the rest of the interface, plus a small bridge that connects it to T3 Code.
 
 > [!WARNING]
-> **Early release, still experimental.** It's built for and tested on one setup: **Omarchy 4.5.0**, **T3 Code Nightly** (0.1.7-nightly) and **World of Warcraft: Forever** (1.60.x) under Proton. Other setups may work but aren't supported yet. T3 Code Nightly's API changes often, so a T3 update can break things until this catches up. Expect rough edges, and please [report them](https://github.com/ryanrhughes/t3code-wow/issues).
+> **Early release, still experimental.** The original bridge targets Omarchy 4.5.0 with WoW: Forever under Proton. The Windows bridge was tested with WoW: Forever 1.60.x and a T3 Code Nightly server on macOS. The bridge uses orchestration protocol 2, and changes in T3 Code Nightly can affect compatibility.
 
 ## What it does
 
 - **T3 Code window** (`/t3`): your threads grouped into Working, Open and Settled, filtered by project or machine. Read a thread, reply, queue follow-ups, stop a run, settle or reopen it, start new threads, answer the agent's questions and approve its requests.
-- The **agent and model** appear above the message box. Choose a pair from the server's catalog when starting a thread or changing a thread's selection.
+- The **agent and model** appear above the message box. Choose a pair from the server's catalog, then choose a **reasoning** level if the model offers one. Both selectors work on new threads and on existing threads between runs.
 - **Quest tracker**: what's running, what needs you and what just finished, right under your quests, with live timers.
 - **Notices**: a toast, a sound and a chat line when a thread finishes or needs you. They wait until combat ends, and stay quiet in dungeons and raids if you like.
 - **Full controller support**: the D-pad moves between controls, A selects, B goes back, LB/RB switch tabs, X reads aloud and holding Y dictates. Hold both triggers and press Back to open it from anywhere.
@@ -18,15 +18,43 @@ Watch and run your [T3 Code](https://t3.codes) agent threads without leaving the
 - **Usage**: your providers' plans and limits, the same as Omarchy's Agents panel shows.
 - A minimap button and a game-menu entry, for opening it without a keyboard.
 
-## Requirements
+## Install on Windows
+
+You need [Git for Windows](https://git-scm.com/download/win), [Node.js 22 or newer](https://nodejs.org/en/download), WoW: Forever, and a running T3 Code Nightly server. Reopen PowerShell after installing Node so it picks up the updated PATH.
+
+```powershell
+git clone --branch windows-bridge https://github.com/sdurban/t3code-wow.git
+cd t3code-wow
+.\T3Code-WoW.cmd
+```
+
+1. Choose **Install or update**. Press Enter to accept the detected WoW folder, or enter the path to your WoW folder, `_forever_`, or `Interface\AddOns`.
+2. On the computer running T3 Code, enable **Network access** if you are connecting over your local network. Create a one-time pairing link in its terminal.
+
+   ```bash
+   t3 pair --scope orchestration:read --scope orchestration:operate --label 'WoW bridge Windows'
+   ```
+
+3. Choose **Start bridge** and paste the complete pairing link, including the `#token=…` part, into the hidden prompt. The launcher stores the resulting session encrypted for your Windows account. On later starts, press Enter to reconnect. Keep the launcher open while you play.
+4. On the first install, fully close and reopen WoW: Forever so it sees the addon and its update slots. Log in, keep the game in the foreground, and type `/t3`.
+
+To update, stop the bridge with Ctrl+C, run `git pull --ff-only` in the checkout, and choose **Install or update** again. Start the bridge and use `/reload` in WoW. Your saved session is reused. Choose **Status** or use `/t3 selftest` to check the link. To remove the addon and local settings, choose **Uninstall**. You can revoke the corresponding session in T3 Code on the server.
+
+The menu also accepts commands from PowerShell.
+
+```powershell
+.\T3Code-WoW.cmd install -WowPath 'C:\Program Files (x86)\World of Warcraft'
+.\T3Code-WoW.cmd start
+.\T3Code-WoW.cmd status
+```
+
+## Install on Omarchy
 
 - **Omarchy 4.5.0** (Hyprland). The bridge reads the game window with Hyprland's screen capture, and dictation and usage come from Omarchy's own tools.
 - **T3 Code Nightly**, installed and running. Its `t3` command gives the bridge a login.
 - **World of Warcraft: Forever**, installed with Omarchy's Battle.net (Proton).
 - **Node.js 22** or newer.
 - **Game sound on.** The addon learns about new updates through silent sounds; with sound off it falls back to slower polling.
-
-## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryanrhughes/t3code-wow/main/install.sh | bash
@@ -37,24 +65,6 @@ Run the same command again to update. It finds World of Warcraft: Forever in Oma
 Then it tells you what to do in the game and waits until the game checks in. The first time, **fully quit and restart World of Warcraft**: the game only finds new addon folders when it starts. After that, updates only need a `/reload`.
 
 To install from a clone instead, run `./install.sh` in it.
-
-### Windows (experimental)
-
-Use Node.js 22 or newer and run these commands from the checkout in PowerShell. Give `--wow` the folder that contains `_forever_`, or the `_forever_` folder itself.
-
-```powershell
-node .\bridge\bin\t3code-wow.js install --wow 'C:\Program Files (x86)\World of Warcraft'
-```
-
-On the machine running T3 Code, issue a session for the bridge with `t3 auth session issue --scope orchestration:read --scope orchestration:operate --ttl 30d --label 'WoW bridge Windows' --token-only`. For a direct connection on a trusted LAN, enable **Network access** in T3 Code on the host. Set `T3_ORIGIN` to the host's LAN address and port, and enter the token privately as `T3_TOKEN` in the Windows PowerShell session. For example, in PowerShell 7:
-
-```powershell
-$env:T3_ORIGIN = 'http://192.168.1.10:4960' # Use your T3 Code origin
-$env:T3_TOKEN = Read-Host 'T3 Code session token' -MaskInput
-try { node .\bridge\bin\t3code-wow.js run } finally { Remove-Item Env:T3_TOKEN }
-```
-
-Start or fully restart WoW: Forever after installing the addon and slots. Keep the game in the foreground so the bridge can read its pixels. Open `/t3` after logging in and use `/t3 selftest` to check the link. Run the bridge from an open terminal on Windows. Voice playback uses the game's text-to-speech where available. Omarchy's dictation and usage integrations are unavailable on Windows.
 
 ### Uninstall
 
