@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { findWindowsWowProcess } from './windows.js';
 
 const FLAVOR = '_forever_';
 // Omarchy's Battle.net installer (omarchy-install-gaming-battlenet) uses this prefix.
@@ -100,9 +101,10 @@ export function addonsDir(wowDir) {
   return path.join(wowDir, 'Interface', 'AddOns');
 }
 
-// The running Forever client: { pid, startTicks } or null. startTicks (from
-// /proc/<pid>/stat) distinguishes a restarted client that happens to reuse a pid.
+// The running Forever client: { pid, startTicks } or null. The start time
+// distinguishes a restarted client that happens to reuse a pid.
 export function findWowProcess() {
+  if (process.platform === 'win32') return findWindowsWowProcess();
   let entries;
   try {
     entries = fs.readdirSync('/proc');

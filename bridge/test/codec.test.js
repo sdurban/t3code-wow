@@ -7,7 +7,7 @@ import { encodeFrame, decodeImage, renderCells, cellsToBytes, bytesToCells, MAX_
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const lua = ['lua5.1', 'luajit', 'lua'].find((bin) => {
-  try { execFileSync('which', [bin], { stdio: 'ignore' }); return true; } catch { return false; }
+  try { execFileSync(bin, ['-v'], { stdio: 'ignore' }); return true; } catch { return false; }
 });
 
 function luaCells(seq, payloadHex) {

@@ -37,6 +37,24 @@ Then it tells you what to do in the game and waits until the game checks in. The
 
 To install from a clone instead, run `./install.sh` in it.
 
+### Windows (experimental)
+
+Use Node.js 22 or newer and run these commands from the checkout in PowerShell. Give `--wow` the folder that contains `_forever_`, or the `_forever_` folder itself.
+
+```powershell
+node .\bridge\bin\t3code-wow.js install --wow 'C:\Program Files (x86)\World of Warcraft'
+```
+
+On the machine running T3 Code, issue a session for the bridge with `t3 auth session issue --scope orchestration:read --scope orchestration:operate --ttl 30d --label 'WoW bridge Windows' --token-only`. For a remote machine, use an HTTPS origin or an SSH tunnel. For a T3 Code server on a Mac listening on loopback, open the tunnel with `ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:43773:127.0.0.1:MAC_T3_PORT USER@MAC_HOST` and keep that terminal open. Set `T3_ORIGIN` to the address the bridge can reach and enter the token privately as `T3_TOKEN` in the Windows PowerShell session. For example, in PowerShell 7:
+
+```powershell
+$env:T3_ORIGIN = 'http://127.0.0.1:43773' # Example local SSH forward
+$env:T3_TOKEN = Read-Host 'T3 Code session token' -MaskInput
+try { node .\bridge\bin\t3code-wow.js run } finally { Remove-Item Env:T3_TOKEN }
+```
+
+Start or fully restart WoW: Forever after installing the addon and slots. Keep the game in the foreground so the bridge can read its pixels. Open `/t3` after logging in and use `/t3 selftest` to check the link. Run the bridge from an open terminal on Windows. Voice playback uses the game's text-to-speech where available. Omarchy's dictation and usage integrations are unavailable on Windows.
+
 ### Uninstall
 
 ```bash

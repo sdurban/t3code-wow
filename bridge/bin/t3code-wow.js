@@ -16,6 +16,7 @@ import { identify, discoverTailscale, mintRemote, revokeRemote, saveToken, readT
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BRIDGE_ROOT = path.resolve(HERE, '..');
+const WINDOWS = process.platform === 'win32';
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const UNIT_NAME = 't3code-wow.service';
 const UNIT_FILE = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'systemd/user', UNIT_NAME);
@@ -75,10 +76,18 @@ function copyDir(src, dst) {
 function resolveWowDir(args, cfg) {
   if (args.wow) {
     const dir = path.resolve(String(args.wow));
+    if (WINDOWS) {
+      const forever = path.basename(dir).toLowerCase() === '_forever_' ? dir : path.join(dir, '_forever_');
+      if (!fs.existsSync(path.join(forever, 'Wow.exe'))) {
+        throw new Error(`couldn't find WoW: Forever at ${forever}. Pass --wow with the game folder.`);
+      }
+      return forever;
+    }
     if (fs.existsSync(path.join(dir, '_forever_'))) return path.join(dir, '_forever_');
     return dir;
   }
   if (cfg.wowDir && fs.existsSync(cfg.wowDir)) return cfg.wowDir;
+  if (WINDOWS) throw new Error('pass --wow with the World of Warcraft or _forever_ folder');
   const { forever, wowOnly, prefixes } = findWowInstalls();
   if (forever.length > 1) console.log(C.y(`Found several WoW: Forever installs, using the first (pick one with --wow):\n  ${forever.join('\n  ')}`));
   if (forever.length) return forever[0];
@@ -137,6 +146,11 @@ async function cmdInstall(args) {
   const { signals: _legacySignals, ...rest } = cfg;
   const next = { ...rest, wowDir, addonsDir, slots };
   writeConfig(next);
+
+  if (WINDOWS) {
+    await firstLaunch({ restart: freshAddon || had < slots || bellsMissing, running: !!findWowProcess(), waiting: false });
+    return;
+  }
 
   if (!findT3Cli()) {
     console.log(C.r('✗ The `t3` command was not found. Open T3 Code once (it installs `t3`), then run `t3code-wow install` again.'));
@@ -235,6 +249,14 @@ async function firstLaunch({ restart, running, waiting, since }) {
       console.log(C.y('The game hasn\'t checked in yet. Once you\'re in, `t3code-wow status` shows whether it connected.'));
     }
   }
+  const fromHere = WINDOWS
+    ? `  Set T3_ORIGIN and T3_TOKEN for the T3 Code server, then run:
+  node bridge/bin/t3code-wow.js run
+  node bridge/bin/t3code-wow.js status   check the bridge in a separate terminal`
+    : `  t3code-wow env add <host>   show threads from another machine (T3 Connect)
+  t3code-wow status           what the bridge sees
+  rerun the install command   update
+  t3code-wow uninstall        remove everything`;
   console.log(`
 ${C.b('In game')}
   /t3                       open or close T3 Code (or click the T3 button on the minimap)
@@ -242,10 +264,7 @@ ${C.b('In game')}
   /t3 selftest              check the link step by step if something seems off
 
 ${C.b('From here')}
-  t3code-wow env add <host>   show threads from another machine (T3 Connect)
-  t3code-wow status           what the bridge sees
-  rerun the install command   update
-  t3code-wow uninstall        remove everything`);
+${fromHere}`);
 }
 
 function cmdSync(args) {
@@ -260,6 +279,9 @@ function cmdSync(args) {
 async function cmdRun(args) {
   const cfg = readConfig();
   const addonsDir = cfg.addonsDir || addonsDirOf(resolveWowDir(args, cfg));
+  if (WINDOWS && (!process.env.T3_ORIGIN || !process.env.T3_TOKEN)) {
+    throw new Error('set T3_ORIGIN and T3_TOKEN for your T3 Code server before starting the Windows bridge');
+  }
   const bridge = new Bridge({ addonsDir, config: { ...cfg, verbose: args.verbose || cfg.verbose } });
   const stop = () => {
     bridge.stop();
@@ -310,7 +332,12 @@ async function cmdProbe() {
   const proc = findWowProcess();
   const cap = new StripCapture({});
   console.log(`backend: ${cap.resolveBackend()}; WoW pid: ${proc?.pid ?? 'not running'}`);
-  const res = await cap.grab(proc?.pid);
+  let res;
+  try {
+    res = await cap.grab(proc?.pid);
+  } finally {
+    cap.close();
+  }
   if (res.status !== 'ok') return console.log(`capture: ${res.status}`);
   const out = path.join(os.tmpdir(), 't3code-wow-probe.ppm');
   const img = res.image;
@@ -349,7 +376,7 @@ async function cmdUninstall(args) {
   const done = (msg) => console.log(`${C.g('✓')} ${msg}`);
   const warn = (msg) => console.log(`${C.y('!')} ${msg}`);
 
-  if (fs.existsSync(UNIT_FILE)) {
+  if (!WINDOWS && fs.existsSync(UNIT_FILE)) {
     spawnSync('systemctl', ['--user', 'disable', '--now', UNIT_NAME], { stdio: 'ignore' });
     fs.rmSync(UNIT_FILE);
     spawnSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
@@ -409,11 +436,15 @@ async function cmdUninstall(args) {
   fs.rmSync(STATE_DIR, { recursive: true, force: true });
   done('Removed the bridge\'s settings and state');
 
-  try {
-    if (fs.lstatSync(BIN_LINK).isSymbolicLink() && fs.readlinkSync(BIN_LINK).startsWith(DATA_DIR)) fs.rmSync(BIN_LINK);
-  } catch {}
-  fs.rmSync(DATA_DIR, { recursive: true, force: true });
-  done('Removed the t3code-wow command and its files');
+  if (WINDOWS) {
+    console.log('Revoke the Windows bridge session on the T3 Code server if you issued one there.');
+  } else {
+    try {
+      if (fs.lstatSync(BIN_LINK).isSymbolicLink() && fs.readlinkSync(BIN_LINK).startsWith(DATA_DIR)) fs.rmSync(BIN_LINK);
+    } catch {}
+    fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    done('Removed the t3code-wow command and its files');
+  }
 
   if (findWowProcess()) console.log(`\nWorld of Warcraft is running: ${C.b('/reload')} or restart it to finish unloading T3 Code.`);
 }

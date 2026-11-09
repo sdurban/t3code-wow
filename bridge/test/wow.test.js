@@ -21,15 +21,16 @@ function reset() {
 }
 
 const omarchy = () => path.join(home, 'Games/battlenet');
+const linux = { skip: process.platform !== 'linux' && 'requires Linux Wine prefixes' };
 
-test("finds Forever in Omarchy's Battle.net prefix", () => {
+test("finds Forever in Omarchy's Battle.net prefix", linux, () => {
   reset();
   touch(path.join(omarchy(), 'drive_c/Program Files (x86)/Battle.net/Battle.net.exe'));
   touch(path.join(omarchy(), 'drive_c/Program Files (x86)/World of Warcraft/_forever_/Wow.exe'));
   assert.deepEqual(findWowInstalls().forever, [path.join(omarchy(), 'drive_c/Program Files (x86)/World of Warcraft/_forever_')]);
 });
 
-test("finds a custom install folder from Battle.net's records, including another drive", () => {
+test("finds a custom install folder from Battle.net's records, including another drive", linux, () => {
   reset();
   touch(path.join(omarchy(), 'drive_c/ProgramData/Battle.net/Agent/product.db'),
     'junk\x00\x12(C:/Games/World of Warcraft\x00wowf\x00\x12"D:\\Blizzard\\World of Warcraft"');
@@ -44,7 +45,7 @@ test("finds a custom install folder from Battle.net's records, including another
   assert.deepEqual(r.wowOnly, [path.join(omarchy(), 'dosdevices/d:/Blizzard/World of Warcraft')]);
 });
 
-test('tells WoW without Forever apart from no WoW at all, and ignores other games\' prefixes', () => {
+test('tells WoW without Forever apart from no WoW at all, and ignores other games\' prefixes', linux, () => {
   reset();
   touch(path.join(omarchy(), 'drive_c/Program Files (x86)/Battle.net/Battle.net.exe'));
   touch(path.join(omarchy(), 'drive_c/Program Files (x86)/World of Warcraft/_retail_/Wow.exe'));

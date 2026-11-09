@@ -287,6 +287,7 @@ export class Bridge {
     clearInterval(this.usageTimer);
     clearTimeout(this.publishTimer);
     this.t3.stop();
+    this.capture.close?.();
     this.voice.hush();
   }
 

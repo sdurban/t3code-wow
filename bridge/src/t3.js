@@ -2,8 +2,8 @@
 // frames) and HTTP API the desktop, web and mobile clients use.
 //
 // Auth is a scoped session token minted by `t3 auth session issue` (see auth.js).
-// Every reconnect re-reads ~/.t3/userdata/server-runtime.json, because the server
-// moves when the app updates or restarts.
+// A local connection re-reads ~/.t3/userdata/server-runtime.json on every
+// reconnect because the server moves when the app updates or restarts.
 
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
@@ -22,6 +22,21 @@ export function readRuntime() {
   const runtime = JSON.parse(fs.readFileSync(file, 'utf8'));
   if (!runtime.origin) throw new Error(`no origin in ${file}`);
   return runtime;
+}
+
+export function normalizeT3Origin(value) {
+  const error = 'T3_ORIGIN must be an HTTP or HTTPS origin without credentials, a path, or a pairing code';
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(error);
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
+    || url.href !== `${url.origin}/`) {
+    throw new Error(error);
+  }
+  return url.origin;
 }
 
 const WORKING = new Set(['preparing', 'queued', 'starting', 'running', 'waiting']);
@@ -48,9 +63,12 @@ export class T3Client extends EventEmitter {
   constructor({ tokenProvider, log = () => {}, originProvider = null, label = 'local' }) {
     super();
     this.tokenProvider = tokenProvider;
-    // Where the server is: this machine's runtime file by default, or a function
-    // that finds a remote machine's address.
-    this.originProvider = originProvider || (async () => readRuntime().origin);
+    // Additional machines have their own providers. The primary server can be
+    // reached at a fixed address without running T3 Code on this machine.
+    this.originProvider = originProvider || (async () => {
+      if (process.env.T3_ORIGIN) return normalizeT3Origin(process.env.T3_ORIGIN);
+      return readRuntime().origin;
+    });
     this.label = label;
     this.log = log;
     this.ws = null;

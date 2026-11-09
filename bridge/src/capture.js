@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { decodeImage, parsePPM, CELLS_PER_ROW, MAX_ROWS } from './codec.js';
+import { WindowsCapture } from './windows.js';
 
 // A service may start before the session exports WAYLAND_DISPLAY; find the socket.
 function captureEnv() {
@@ -124,6 +125,7 @@ export class StripCapture {
 
   resolveBackend() {
     if (this.backend !== 'auto') return this.backend;
+    if (process.platform === 'win32') return 'windows';
     if (process.env.WAYLAND_DISPLAY || hyprSocket()) {
       if (hyprSocket() && which('grim')) return 'hyprland';
       if (which('grim')) return 'grim';
@@ -131,6 +133,15 @@ export class StripCapture {
     if (process.env.DISPLAY && which('import')) return 'x11';
     if (which('grim')) return 'grim';
     return 'none';
+  }
+
+  windows() {
+    this.windowsCapture ??= new WindowsCapture();
+    return this.windowsCapture;
+  }
+
+  close() {
+    this.windowsCapture?.close();
   }
 
   // Size of the region to grab, in physical pixels: the largest strip plus slack for
@@ -144,6 +155,11 @@ export class StripCapture {
     this.stats.captures++;
     if (backend === 'none') throw new Error('no capture backend: install grim (Wayland/wlroots) or ImageMagick (X11)');
     const px = StripCapture.stripPixels(4);
+    if (backend === 'windows') {
+      const res = await this.windows().request(wowPid, px.width, px.height);
+      if (res.status === 'hidden') this.stats.notVisible++;
+      return res.status === 'ok' ? { status: 'ok', image: parsePPM(res.data) } : res;
+    }
     if (backend === 'hyprland' || backend === 'grim') {
       let region = this.manualRegion;
       let scale = 1;
@@ -180,6 +196,11 @@ export class StripCapture {
   async screenshot(wowPid) {
     const backend = this.resolveBackend();
     const name = `wow-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.jpg`;
+    if (backend === 'windows') {
+      const res = await this.windows().request(wowPid, 0, 0);
+      if (res.status !== 'ok') throw new Error('Bring World of Warcraft to the foreground to take a screenshot');
+      return { data: res.data, name, mime: 'image/jpeg' };
+    }
     if (backend === 'hyprland' || backend === 'grim') {
       const args = ['-t', 'jpeg', '-q', '85', '-s', '1'];
       if (backend === 'hyprland') {

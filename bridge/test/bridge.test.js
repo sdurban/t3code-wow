@@ -221,7 +221,7 @@ test('lua serializer escapes strings and keeps utf-8', () => {
   fs.writeFileSync(file, Buffer.from(`local t = ${s}; io.write(t.a, "|", t.b[1], "|", t["not ident"], "|", t["end"])`, 'latin1'));
   const out = execFileSync('lua5.1', [file]);
   fs.rmSync(file);
-  assert.equal(out.toString('utf8'), 'x"y\\z\n\u0001|é|1|2');
+  assert.equal(out.toString('utf8').replaceAll('\r\n', '\n'), 'x"y\\z\n\u0001|é|1|2');
 });
 
 test('markdown formatting', () => {
@@ -353,6 +353,37 @@ test('reopening a settled thread sends the reason T3 Code requires', async () =>
   assert.equal(sent[0][0], 'orchestration.dispatchCommand');
   assert.equal(sent[0][1].type, 'thread.unsettle');
   assert.equal(sent[0][1].reason, 'user');
+});
+
+test('the bridge connects to a configured primary T3 server without a local session', async (t) => {
+  const { Fleet } = await import('../src/fleet.js');
+  const { tokenProvider } = await import('../src/auth.js');
+  const originalOrigin = process.env.T3_ORIGIN;
+  const originalToken = process.env.T3_TOKEN;
+  t.after(() => {
+    if (originalOrigin === undefined) delete process.env.T3_ORIGIN;
+    else process.env.T3_ORIGIN = originalOrigin;
+    if (originalToken === undefined) delete process.env.T3_TOKEN;
+    else process.env.T3_TOKEN = originalToken;
+  });
+
+  process.env.T3_ORIGIN = 'http://127.0.0.1:43773/';
+  process.env.T3_TOKEN = 'test-token';
+  const tokens = tokenProvider();
+  const fleet = new Fleet({ localTokens: tokens });
+  const client = fleet.local.client;
+  const request = t.mock.method(globalThis, 'fetch', async () => Response.json({ ticket: 'test-ticket' }));
+  const open = t.mock.method(client, 'open', async () => {});
+  await client.connect();
+
+  const [ticketUrl, options] = request.mock.calls[0].arguments;
+  assert.equal(ticketUrl.href, 'http://127.0.0.1:43773/api/auth/websocket-ticket/rpc');
+  assert.equal(options.headers.authorization, 'Bearer test-token');
+  const [socketUrl] = open.mock.calls[0].arguments;
+  assert.equal(socketUrl.href, 'ws://127.0.0.1:43773/ws?orchestrationProtocol=2&wsTicket=test-ticket');
+
+  delete process.env.T3_TOKEN;
+  await assert.rejects(tokens(), /Set T3_TOKEN/);
 });
 
 test('schema errors from T3 Code read as a version mismatch', () => {

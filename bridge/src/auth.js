@@ -74,7 +74,8 @@ export function tokenProvider({ log = () => {} } = {}) {
   let minting = null;
   let forceRenew = false;
   const provider = async () => {
-    if (process.env.T3_TOKEN) return process.env.T3_TOKEN;
+    if (process.env.T3_TOKEN?.trim()) return process.env.T3_TOKEN.trim();
+    if (process.env.T3_ORIGIN) throw new Error('Set T3_TOKEN to a scoped session token from the T3 Code server');
     let token = readToken();
     const claims = token && tokenClaims(token);
     const expiring = !claims || (claims.exp && claims.exp - Date.now() < RENEW_BEFORE_MS);
