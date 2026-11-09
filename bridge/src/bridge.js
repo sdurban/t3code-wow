@@ -231,6 +231,7 @@ export class Bridge {
     this.lastDigest = null;
     this.dirty = { important: false, minor: false, view: false };
     this.publishTimer = null;
+    this.publishRetry = null;
     this.stopped = false;
     this.captureState = 'starting';
     this.prevStatus = new Map();
@@ -867,7 +868,9 @@ export class Bridge {
   }
 
   schedulePublish() {
-    const delay = this.nextPublishDelay();
+    const delay = this.publishRetry
+      ? Math.max(0, this.publishRetry.at - Date.now())
+      : this.nextPublishDelay();
     if (delay === null) return;
     const due = Date.now() + delay;
     if (this.publishTimer && this.publishDue <= due) return;
@@ -877,12 +880,16 @@ export class Bridge {
       this.publishTimer = null;
       this.publishNow();
       // Something may still be dirty (e.g. results) or a heartbeat is due later.
-      if (this.client) this.schedulePublish();
+      if (this.client || this.publishRetry) this.schedulePublish();
     }, delay);
   }
 
   publishNow(reason) {
-    if (!this.proc && !reason) return false;
+    if (!this.proc && !reason) {
+      this.publishRetry = null;
+      return false;
+    }
+    if (this.publishRetry && this.publishRetry.at > Date.now()) return false;
     const snapshot = this.buildSnapshot();
     const digest = createHash('sha1').update(JSON.stringify(snapshot)).digest('hex');
     const c = this.client;
@@ -890,7 +897,7 @@ export class Bridge {
     const heartbeatDue = c && Date.now() - this.lastPublishAt > (c.flags.includes('o') ? 85000 : 595000);
     this.dirty = { important: false, minor: false, view: false };
     this.urgent = false;
-    if (digest === this.lastDigest && !needAck && !heartbeatDue && !reason) return false;
+    if (digest === this.lastDigest && !needAck && !heartbeatDue && !reason && !this.publishRetry) return false;
 
     const gen = Math.max(Date.now(), this.lastGen + 1);
     // Signals: raise the next number in sequence, never skipping any. If the addon
@@ -944,9 +951,21 @@ export class Bridge {
         this.persist.slotGuess = predicted + 1;
       }
     } catch (err) {
+      if (process.platform === 'win32' && err.syscall === 'rename' && ['EPERM', 'EACCES', 'EBUSY'].includes(err.code)) {
+        // WoW briefly holds streamed sounds open without sharing delete access.
+        // Keep the snapshot pending and let the handle close before trying again.
+        const previous = this.publishRetry?.delay || 0;
+        const delay = previous ? Math.min(previous * 2, 1200) : 150;
+        this.publishRetry = { delay, at: Date.now() + delay };
+        if (delay === 1200 && previous < delay) this.log(`publish waiting for a Windows file lock: ${err.message}`);
+        this.schedulePublish();
+        return false;
+      }
+      this.publishRetry = null;
       this.log(`publish failed: ${err.message}`);
       return false;
     }
+    this.publishRetry = null;
     for (const r of this.results) r.sent = true;
     this.lastGen = gen;
     this.persist.gen = gen;

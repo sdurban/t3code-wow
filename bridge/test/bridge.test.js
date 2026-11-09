@@ -116,6 +116,38 @@ test('publish writes the next slots and bootstrap slots, then raises one signal'
   b.stop();
 });
 
+test('a Windows sharing violation delays publication and retries after the file is released', { skip: process.platform !== 'win32' }, (t) => {
+  const { b, dir } = fakeBridge();
+  t.after(() => b.stop());
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  const rename = fs.renameSync;
+  const bell = b.bank.bellFile(1);
+  let locked = true;
+  let attempts = 0;
+  t.mock.method(fs, 'renameSync', (source, target) => {
+    if (target === bell) {
+      attempts++;
+      if (locked) throw Object.assign(new Error('sharing violation'), { code: 'EPERM', syscall: 'rename' });
+    }
+    return rename(source, target);
+  });
+
+  b.onFrame(frame(1, [['H', 1, 'sess', 'ui1', 2, 1, 0, 'o', '', '0.1.0']]));
+  assert.equal(b.publishNow(), false);
+  assert.equal(b.persist.sigCounter, 1);
+  assert.equal(rung(dir, 1), 0);
+  assert.equal(fs.existsSync(`${bell}.${process.pid}.tmp`), false);
+
+  t.mock.timers.tick(149);
+  assert.equal(attempts, 1);
+  locked = false;
+  t.mock.timers.tick(1);
+  assert.equal(attempts, 2);
+  assert.ok(rung(dir, 1) > 174762);
+  assert.equal(b.persist.sigCounter, 2);
+  assert.equal(b.client.ackedSeq, 1);
+});
+
 test('commands run once, in order, and results are published', async () => {
   const { b, dir, calls } = fakeBridge();
   const f = frame(2, [['H', 1, 'sess', 'ui1', 1, 1, 0, 'o', 't1', '0.1.0'], ['C', 1, 'send', 't1', 'hello'], ['C', 2, 'new', 'p1', 'start it']]);

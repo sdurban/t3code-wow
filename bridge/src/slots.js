@@ -64,7 +64,12 @@ export const LONG_SILENT_WAV = (() => {
 function atomicWrite(file, content) {
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, file);
+  try {
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch {}
+    throw err;
+  }
 }
 
 export class SlotBank {
@@ -194,8 +199,9 @@ export class SlotBank {
   // Fill bell k and empty the one four behind it, so the addon's look-ahead window
   // (k .. k+3) only ever sees bells raised after it last loaded.
   raise(k) {
-    atomicWrite(this.bellFile(k), LONG_SILENT_WAV);
+    // A locked predecessor must be cleared before making the new bell visible.
     atomicWrite(this.bellFile(k - 4), '');
+    atomicWrite(this.bellFile(k), LONG_SILENT_WAV);
     return true;
   }
 
