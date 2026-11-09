@@ -45,10 +45,10 @@ Use Node.js 22 or newer and run these commands from the checkout in PowerShell. 
 node .\bridge\bin\t3code-wow.js install --wow 'C:\Program Files (x86)\World of Warcraft'
 ```
 
-On the machine running T3 Code, issue a session for the bridge with `t3 auth session issue --scope orchestration:read --scope orchestration:operate --ttl 30d --label 'WoW bridge Windows' --token-only`. For a remote machine, use an HTTPS origin or an SSH tunnel. For a T3 Code server on a Mac listening on loopback, open the tunnel with `ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:43773:127.0.0.1:MAC_T3_PORT USER@MAC_HOST` and keep that terminal open. Set `T3_ORIGIN` to the address the bridge can reach and enter the token privately as `T3_TOKEN` in the Windows PowerShell session. For example, in PowerShell 7:
+On the machine running T3 Code, issue a session for the bridge with `t3 auth session issue --scope orchestration:read --scope orchestration:operate --ttl 30d --label 'WoW bridge Windows' --token-only`. For a direct connection on a trusted LAN, enable **Network access** in T3 Code on the host. Set `T3_ORIGIN` to the host's LAN address and port, and enter the token privately as `T3_TOKEN` in the Windows PowerShell session. For example, in PowerShell 7:
 
 ```powershell
-$env:T3_ORIGIN = 'http://127.0.0.1:43773' # Example local SSH forward
+$env:T3_ORIGIN = 'http://192.168.1.10:4960' # Use your T3 Code origin
 $env:T3_TOKEN = Read-Host 'T3 Code session token' -MaskInput
 try { node .\bridge\bin\t3code-wow.js run } finally { Remove-Item Env:T3_TOKEN }
 ```

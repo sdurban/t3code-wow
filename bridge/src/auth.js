@@ -5,11 +5,50 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { normalizeT3Origin } from './t3.js';
 
 export const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 't3code-wow');
 export const TOKEN_FILE = path.join(CONFIG_DIR, 'token');
 
 const RENEW_BEFORE_MS = 7 * 24 * 3600 * 1000;
+const BRIDGE_SCOPES = ['orchestration:read', 'orchestration:operate'];
+const OAUTH_ACCESS_TOKEN = 'urn:ietf:params:oauth:token-type:access_token';
+
+export async function exchangePairingCode(origin, code) {
+  const endpoint = new URL('/oauth/token', normalizeT3Origin(origin));
+  const body = new URLSearchParams({
+    grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+    subject_token: code,
+    subject_token_type: 'urn:t3:params:oauth:token-type:environment-bootstrap',
+    requested_token_type: OAUTH_ACCESS_TOKEN,
+    scope: BRIDGE_SCOPES.join(' '),
+    client_label: 'WoW bridge Windows',
+    client_device_type: 'desktop',
+    client_os: 'Windows',
+  });
+
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST', body, redirect: 'error', signal: AbortSignal.timeout(8000),
+    });
+  } catch {
+    throw new Error('Could not reach the T3 Code token endpoint. Check the server address and network access.');
+  }
+  if (response.status === 404) throw new Error('This T3 Code server cannot exchange pairing codes. Use a scoped session token.');
+  if (!response.ok) throw new Error('T3 Code refused the pairing code. Create a fresh link with permission to read and operate threads.');
+
+  const result = await response.json().catch(() => null);
+  if (result?.token_type !== 'Bearer' || typeof result.access_token !== 'string'
+    || !/^[A-Za-z0-9._~+/\-]+=*$/.test(result.access_token)) {
+    throw new Error('T3 Code did not return a bearer session. Create a fresh pairing link and try again.');
+  }
+  const scopes = new Set(typeof result.scope === 'string' ? result.scope.trim().split(/\s+/) : []);
+  if (scopes.size !== BRIDGE_SCOPES.length || BRIDGE_SCOPES.some((scope) => !scopes.has(scope))) {
+    throw new Error('The T3 Code session must grant exactly read and operate permissions for threads.');
+  }
+  return result.access_token;
+}
 
 export function tokenClaims(token) {
   try {
@@ -43,8 +82,7 @@ export function mintToken({ label = 'WoW bridge' } = {}) {
   if (!cli) return Promise.reject(new Error('could not find the `t3` command; open T3 Code once so it installs it'));
   const args = [
     'auth', 'session', 'issue',
-    '--scope', 'orchestration:read',
-    '--scope', 'orchestration:operate',
+    ...BRIDGE_SCOPES.flatMap((scope) => ['--scope', scope]),
     '--ttl', '30d',
     '--label', label,
     '--token-only',

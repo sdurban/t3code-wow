@@ -386,6 +386,28 @@ test('the bridge connects to a configured primary T3 server without a local sess
   await assert.rejects(tokens(), /Set T3_TOKEN/);
 });
 
+test('pairing exchanges a one-time code for a session with only the bridge scopes', async (t) => {
+  const { exchangePairingCode } = await import('../src/auth.js');
+  const origin = 'https://mac.example.test:4960';
+  const session = {
+    access_token: 'test-bearer', token_type: 'Bearer', scope: 'orchestration:operate orchestration:read',
+  };
+  const fetchToken = t.mock.method(globalThis, 'fetch', async () => Response.json(session));
+
+  assert.equal(await exchangePairingCode(origin, 'test-pairing-code'), 'test-bearer');
+  const [url, options] = fetchToken.mock.calls[0].arguments;
+  assert.equal(url.href, `${origin}/oauth/token`);
+  assert.equal(options.method, 'POST');
+  assert.equal(options.redirect, 'error');
+  assert.equal(options.body.get('subject_token'), 'test-pairing-code');
+  assert.equal(options.body.get('scope'), 'orchestration:read orchestration:operate');
+
+  session.scope = 'orchestration:read';
+  await assert.rejects(exchangePairingCode(origin, 'test-pairing-code'), /exactly read and operate/);
+  session.scope = 'orchestration:read orchestration:operate access:write';
+  await assert.rejects(exchangePairingCode(origin, 'test-pairing-code'), /exactly read and operate/);
+});
+
 test('schema errors from T3 Code read as a version mismatch', () => {
   assert.match(friendlyError('Missing key\n  at ["reason"]'), /didn't accept that request \(it wants "reason"\)/);
   assert.equal(friendlyError('nothing is running in that thread'), 'nothing is running in that thread');

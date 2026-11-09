@@ -7,7 +7,7 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Bridge, STATE_DIR, VERSION } from '../src/bridge.js';
-import { CONFIG_DIR, mintToken, readToken, tokenClaims, findT3Cli } from '../src/auth.js';
+import { CONFIG_DIR, exchangePairingCode, mintToken, readToken, tokenClaims, findT3Cli } from '../src/auth.js';
 import { findWowInstalls, addonsDir as addonsDirOf, findWowProcess } from '../src/wow.js';
 import { SlotBank, ADDON, CTL_LONG } from '../src/slots.js';
 import { StripCapture } from '../src/capture.js';
@@ -274,6 +274,16 @@ function cmdSync(args) {
   const freshAddon = !fs.existsSync(path.join(addonsDir, ADDON, `${ADDON}.toc`));
   const dst = syncAddon(addonsDir);
   console.log(`${C.g('✓')} Addon code copied to ${dst}. Type /reload in game.`);
+}
+
+// The Windows launcher captures this pipe and encrypts the returned session.
+async function cmdRedeemPairing() {
+  if (process.stdout.isTTY) throw new Error('Use the Windows launcher to redeem a pairing link privately.');
+  if (!process.env.T3_ORIGIN || !process.env.T3_PAIRING_CODE) {
+    throw new Error('T3_ORIGIN and T3_PAIRING_CODE are required.');
+  }
+  const token = await exchangePairingCode(process.env.T3_ORIGIN, process.env.T3_PAIRING_CODE);
+  process.stdout.write(token);
 }
 
 async function cmdRun(args) {
@@ -560,7 +570,7 @@ function help() {
 
 const args = parseArgs(process.argv.slice(2));
 const cmd = args._[0];
-const commands = { env: cmdEnv, install: cmdInstall, run: cmdRun, status: cmdStatus, sync: cmdSync, probe: cmdProbe, uninstall: cmdUninstall };
+const commands = { env: cmdEnv, install: cmdInstall, run: cmdRun, status: cmdStatus, sync: cmdSync, probe: cmdProbe, uninstall: cmdUninstall, 'redeem-pairing': cmdRedeemPairing };
 if (!cmd || args.help || !commands[cmd]) {
   help();
   if (cmd && !commands[cmd]) process.exitCode = 1;
