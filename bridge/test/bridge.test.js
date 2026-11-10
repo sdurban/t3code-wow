@@ -6,7 +6,6 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { Bridge, friendlyError, parseFrame, activityLabel, pendingRequest, runSummary, proposedPlan } from '../src/bridge.js';
 import { SlotBank } from '../src/slots.js';
-import { T3Client } from '../src/t3.js';
 import { luaValue } from '../src/luaser.js';
 import { markdownToWow, markdownToSpeech } from '../src/format.js';
 import { RS, US } from '../src/codec.js';
@@ -161,6 +160,50 @@ test('commands run once, in order, and results are published', async () => {
   const lua = fs.readFileSync(path.join(dir, 'T3Code_S001', 'Inbox.lua'), 'latin1');
   assert.match(lua, /results=\{\{id=1,ok=true,msg="Sent"\},\{id=2,ok=true,open="new-thread"\}/);
   assert.match(lua, /ack=\{ui="ui1",seq=2\}/);
+  b.stop();
+});
+
+test('a picked model rides along with new, and model switches a thread', async () => {
+  const { b, calls } = fakeBridge();
+  b.t3.setModel = async (...a) => calls.push(['model', ...a]);
+  b.onFrame(frame(1, [['H', 1, 'sess', 'ui1', 1, 1, 0, 'o', 't1', '0.1.0'], ['C', 1, 'new', 'p1', 'go', 'codex', 'gpt-x'], ['C', 2, 'new', 'p1', 'auto'], ['C', 3, 'model', 't1', 'codex', 'gpt-y'], ['C', 4, 'new', 'p1', 'hard', '', '', 'high'], ['C', 5, 'model', 't1', 'codex', 'gpt-y', 'low']]));
+  await new Promise((r) => setTimeout(r, 20));
+  const news = calls.filter((c) => c[0] === 'new');
+  assert.deepEqual(news.find((c) => c[2] === 'go')[4], { model: { instanceId: 'codex', model: 'gpt-x' } });
+  assert.deepEqual(news.find((c) => c[2] === 'auto')[4], {}, 'no pick: T3 picks as before');
+  assert.deepEqual(news.find((c) => c[2] === 'hard')[4], { effort: 'high' }, 'only a level picked: on the default model');
+  const models = calls.filter((c) => c[0] === 'model');
+  assert.deepEqual(models[0], ['model', 't1', 'codex', 'gpt-y', undefined]);
+  assert.deepEqual(models[1], ['model', 't1', 'codex', 'gpt-y', 'low']);
+  b.stop();
+});
+
+test('the model list is only sent while the addon reports a different one', () => {
+  const { b } = fakeBridge();
+  const levels = (...ids) => ({ capabilities: { optionDescriptors: [{ id: 'effort', type: 'select', options: ids.map((id, n) => ({ id, label: id.toUpperCase(), isDefault: n === 1 })) }] } });
+  b.t3.local.client.config = {
+    providers: [
+      { instanceId: 'codex', displayName: 'Codex', enabled: true, models: [{ slug: 'a', name: 'A | B', ...levels('low', 'high') }, { slug: 'b', name: 'B', ...levels('low', 'high') }, { slug: 'n', name: 'N' }] },
+      { instanceId: 'claude', displayName: 'Claude  Harness', enabled: true, models: [{ slug: 'o', name: 'O', ...levels('low', 'max') }] },
+    ],
+  };
+  b.onFrame(frame(1, [['H', 1, 'sess', 'ui1', 1, 1, 0, 'o', '', '0.1.0', '8']]));
+  const first = b.buildSnapshot().models;
+  assert.equal(first.g[0].e, '');
+  assert.deepEqual(first.g[0].p, [
+    { i: 'codex', n: 'Codex', m: [{ s: 'a', l: 'A || B', r: 1 }, { s: 'b', l: 'B', r: 1 }, { s: 'n', l: 'N', r: undefined }] },
+    { i: 'claude', n: 'Claude Harness', m: [{ s: 'o', l: 'O', r: 2 }] },
+  ], 'grouped by provider; models with the same levels share a set');
+  assert.deepEqual(first.g[0].x, [
+    { k: 'effort', d: 'high', o: [{ i: 'low', l: 'LOW' }, { i: 'high', l: 'HIGH' }] },
+    { k: 'effort', d: 'max', o: [{ i: 'low', l: 'LOW' }, { i: 'max', l: 'MAX' }] },
+  ]);
+  b.onFrame(frame(2, [['H', 1, 'sess', 'ui1', 1, 1, 0, 'o', '', '0.1.0', '8', first.h]]));
+  assert.equal(b.buildSnapshot().models, undefined, 'the addon has this list');
+  b.t3.local.client.config.providers[0].models.push({ slug: 'c', name: 'C' });
+  assert.ok(b.buildSnapshot().models, 'a changed list goes out again');
+  for (const p of b.t3.local.client.config.providers) p.enabled = false;
+  assert.deepEqual(b.buildSnapshot().models.g, [], 'switching off the last provider clears the list');
   b.stop();
 });
 
@@ -321,6 +364,25 @@ test('read-aloud waits while the player is in combat', () => {
   b.stop();
 });
 
+test('missing dictation explains itself in platform terms', () => {
+  const { b } = fakeBridge();
+  b.voice.canOmarchyDictate = () => false;
+  b.voice.canTranscribe = () => false;
+  assert.match(b.voice.dictationHint('darwin'), /macOS/, 'macOS gets macOS words');
+  assert.doesNotMatch(b.voice.dictationHint('darwin'), /Omarchy/, "macOS isn't told to use Omarchy");
+  assert.match(b.voice.dictationHint('linux'), /Omarchy/, 'Linux keeps the Omarchy hint');
+  assert.throws(() => b.dictate('start'), (err) => err.message === b.voice.dictationHint());
+  const noBackend = b.buildSnapshot().bridge;
+  assert.equal(noBackend.dictation, undefined);
+  assert.equal(noBackend.dictationHint, b.voice.dictationHint(), 'the addon is told what to show');
+  b.voice.canOmarchyDictate = () => true;
+  b.voice.backendName = () => 'voxtype';
+  const withBackend = b.buildSnapshot().bridge;
+  assert.equal(withBackend.dictation, 'omarchy-dictation (voxtype)');
+  assert.equal(withBackend.dictationHint, undefined, 'no hint when dictation works');
+  b.stop();
+});
+
 test('pacing: fast while reading, patient otherwise, reserve kept for alerts', () => {
   const { b } = fakeBridge(600);
   const hello = (flags, seq = 1) => frame(seq, [['H', 1, 'sess', 'ui1', 2, 1, 0, flags, 't1', '0.1.0', '600']]);
@@ -378,6 +440,7 @@ test('slot manifests are identical and keep the live data out of addon-manager f
 });
 
 test('reopening a settled thread sends the reason T3 Code requires', async () => {
+  const { T3Client } = await import('../src/t3.js');
   const c = new T3Client({ tokenProvider: async () => 'x' });
   const sent = [];
   c.request = async (tag, payload) => sent.push([tag, payload]);
@@ -385,129 +448,6 @@ test('reopening a settled thread sends the reason T3 Code requires', async () =>
   assert.equal(sent[0][0], 'orchestration.dispatchCommand');
   assert.equal(sent[0][1].type, 'thread.unsettle');
   assert.equal(sent[0][1].reason, 'user');
-});
-
-test('model selection uses the thread or project machine and preserves an unchanged default', async (t) => {
-  const { b } = fakeBridge();
-  t.after(() => b.stop());
-  const local = b.t3.local.client;
-  const remote = { code: 'e1', label: 'remote', client: new T3Client({ tokenProvider: async () => 'x' }) };
-  b.t3.envs.push(remote);
-
-  const inherited = { instanceId: 'codex', model: 'gpt', options: [{ id: 'effort', value: 'high' }] };
-  local.onConfig({ type: 'snapshot', config: {
-    settings: { defaultModelSelection: inherited },
-    providers: [{ instanceId: 'codex', displayName: 'Codex | work', enabled: true, installed: true, models: [{ slug: 'gpt', name: 'GPT' }] }],
-  } });
-  remote.client.onConfig({ type: 'snapshot', config: {
-    settings: { defaultModelSelection: { instanceId: 'claude', model: 'sonnet' } },
-    providers: [
-      { instanceId: 'claude', enabled: true, installed: true, models: [{ slug: 'sonnet', name: 'Sonnet' }, { slug: 'opus', name: 'Opus' }, { slug: 'retired', isLegacy: true }] },
-      { instanceId: 'proxy', enabled: true, installed: true, models: [{ slug: 'code', name: 'Proxy Code' }] },
-      { instanceId: 'disabled', enabled: false, installed: true, models: [{ slug: 'disabled', name: 'Disabled' }] },
-    ],
-  } });
-  const thread = { id: 't2', projectId: 'p2', modelSelection: { instanceId: 'claude', model: 'sonnet' } };
-  const project = { id: 'p2', title: 'Remote project' };
-  remote.client.threads.set(thread.id, thread);
-  remote.client.projects.set(project.id, project);
-  b.t3.rebuild(remote);
-
-  const snapshot = b.buildSnapshot();
-  assert.equal(snapshot.models[0].label, 'Codex || work');
-  assert.deepEqual(snapshot.modelsByEnv.e1.map((p) => [p.id, p.models.map((m) => m.id)]), [
-    ['claude', ['sonnet', 'opus']], ['proxy', ['code']],
-  ]);
-  const entry = snapshot.threads.find((x) => x.id === 'e1~t2');
-  assert.deepEqual([entry.e, entry.mi, entry.m, entry.ml], ['e1', 'claude', 'sonnet', 'Sonnet']);
-  const remoteProject = snapshot.projects.find((x) => x.id === 'e1~p2');
-  assert.deepEqual([remoteProject.e, remoteProject.mi, remoteProject.m], ['e1', 'claude', 'sonnet']);
-
-  const writes = [];
-  remote.client.request = async (tag, payload) => writes.push([tag, payload]);
-  local.request = async (tag, payload) => writes.push([tag, payload]);
-  await assert.rejects(b.t3.setThreadModel('e1~t2', inherited), /unavailable on this T3 Code machine/);
-  await b.t3.setThreadModel('e1~t2', thread.modelSelection);
-  assert.equal(writes.length, 0);
-  await b.t3.setThreadModel('e1~t2', { instanceId: 'claude', model: 'opus' });
-  assert.equal(writes[0][1].type, 'thread.model-selection.set');
-  assert.equal(writes[0][1].threadId, 't2');
-  thread.activeRunId = 'run';
-  await b.t3.setThreadModel('e1~t2', thread.modelSelection);
-  await assert.rejects(b.t3.setThreadModel('e1~t2', { instanceId: 'claude', model: 'opus' }), /finish before changing/);
-  await assert.rejects(b.t3.setThreadModel('e1~t2', { instanceId: 'proxy', model: 'code' }), /finish before changing/);
-  thread.activeRunId = null;
-  thread.pendingRuntimeRequest = { kind: 'user_input' };
-  await assert.rejects(b.t3.setThreadModel('e1~t2', { instanceId: 'claude', model: 'opus' }), /finish before changing/);
-  thread.pendingRuntimeRequest = null;
-  remote.client.config.providers[0].requiresNewThreadForModelChange = true;
-  await assert.rejects(b.t3.setThreadModel('e1~t2', { instanceId: 'proxy', model: 'code' }), /Start a new thread/);
-  remote.client.config.providers[0].requiresNewThreadForModelChange = false;
-  await b.t3.setThreadModel('e1~t2', { instanceId: 'proxy', model: 'code' });
-  assert.equal(writes[1][1].type, 'provider.switch');
-
-  await local.launchThread('p1', 'Hello', [], { modelSelection: { instanceId: 'codex', model: 'gpt' } });
-  assert.deepEqual(writes[2][1].modelSelection, inherited);
-  await remote.client.launchThread('p2', 'Hello', [], { modelSelection: { instanceId: 'proxy', model: 'code' } });
-  assert.deepEqual(writes[3][1].modelSelection, { instanceId: 'proxy', model: 'code' });
-});
-
-test('addon model commands update the selection before the next message and can override a new thread', async (t) => {
-  const { b, calls } = fakeBridge();
-  t.after(() => b.stop());
-  const model = { instanceId: 'claude', model: 'opus' };
-  const ready = Promise.withResolvers();
-  b.t3.setThreadModel = async (...a) => {
-    calls.push(['model', ...a]);
-    await ready.promise;
-  };
-  const change = b.runCommand({ id: 1, verb: 'model', args: ['t1', model.instanceId, model.model, 'high'] });
-  const send = b.runCommand({ id: 2, verb: 'send', args: ['t1', 'Hello'] });
-  await new Promise((r) => setImmediate(r));
-  assert.deepEqual(calls, [['model', 't1', model, 'high']]);
-  ready.resolve();
-  await Promise.all([change, send]);
-  assert.equal(calls[1][0], 'send');
-
-  await b.runCommand({ id: 3, verb: 'new', args: ['p1', 'Hello', model.instanceId, model.model] });
-  assert.deepEqual(calls[2], ['new', 'p1', 'Hello', [], { modelSelection: model }]);
-  await b.runCommand({ id: 4, verb: 'new', args: ['p1', 'Hello', '', '', 'low'] });
-  assert.deepEqual(calls[3], ['new', 'p1', 'Hello', [], { effort: 'low' }]);
-});
-
-test('reasoning uses the model descriptor and preserves other options on the same model', async (t) => {
-  const { b } = fakeBridge();
-  t.after(() => b.stop());
-  const client = b.t3.local.client;
-  const effort = { id: 'reasoningEffort', label: 'Reasoning', type: 'select', promptInjectedValues: ['injected'], options: [
-    { id: 'low', label: 'Low' }, { id: 'medium', label: 'Medium', isDefault: true }, { id: 'high', label: 'High' }, { id: 'injected' },
-  ] };
-  const inherited = { instanceId: 'codex', model: 'gpt', options: [{ id: 'fastMode', value: true }] };
-  client.config = {
-    settings: { defaultModelSelection: inherited },
-    providers: [{ instanceId: 'codex', enabled: true, installed: true, models: [{ slug: 'gpt', capabilities: { optionDescriptors: [effort] } }] }],
-  };
-  client.threads.set('effort-thread', { id: 'effort-thread', projectId: 'effort-project', modelSelection: inherited });
-  client.projects.set('effort-project', { id: 'effort-project', title: 'Test project' });
-  b.t3.rebuild(b.t3.local);
-
-  const snapshot = b.buildSnapshot();
-  assert.deepEqual(snapshot.models[0].models[0].effort.choices.map(({ id }) => id), ['low', 'medium', 'high']);
-  assert.equal(snapshot.bridge.eff, 'medium');
-  assert.equal(snapshot.projects.find(({ id }) => id === 'effort-project').eff, 'medium');
-  assert.equal(snapshot.threads.find(({ id }) => id === 'effort-thread').eff, 'medium');
-
-  const writes = [];
-  client.request = async (tag, payload) => writes.push([tag, payload]);
-  await client.setThreadModel('effort-thread', inherited, 'medium');
-  assert.equal(writes.length, 0);
-  await assert.rejects(client.setThreadModel('effort-thread', inherited, 'injected'), /reasoning level is unavailable/);
-  await client.setThreadModel('effort-thread', inherited, 'high');
-  assert.equal(writes[0][1].type, 'thread.model-selection.set');
-  assert.deepEqual(writes[0][1].modelSelection.options, [...inherited.options, { id: effort.id, value: 'high' }]);
-  await client.launchThread('effort-project', 'Hello', [], { effort: 'low' });
-  assert.equal(writes[1][0], 'orchestration.launchThread');
-  assert.deepEqual(writes[1][1].modelSelection.options, [...inherited.options, { id: effort.id, value: 'low' }]);
 });
 
 test('the bridge connects to a configured primary T3 server without a local session', async (t) => {

@@ -10,7 +10,6 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { isDeepStrictEqual } from 'node:util';
 
 export const PROTOCOL = 2;
 
@@ -42,63 +41,6 @@ export function normalizeT3Origin(value) {
 
 const WORKING = new Set(['preparing', 'queued', 'starting', 'running', 'waiting']);
 
-function selectableProvider(p) {
-  return p?.instanceId && p.enabled && p.installed && p.availability !== 'unavailable' && p.supportsTextGeneration !== false;
-}
-
-function selectableModel(m) {
-  return m?.slug && !m.isLegacy;
-}
-
-const REASONING_OPTION = /effort|reason|think/i;
-
-function reasoningDescriptor(model) {
-  for (const option of model?.capabilities?.optionDescriptors || []) {
-    if (option?.type !== 'select' || !option.id || !REASONING_OPTION.test(option.id)) continue;
-    const injected = new Set(option.promptInjectedValues || []);
-    const choices = (option.options || []).filter((choice) => choice?.id && !injected.has(choice.id));
-    if (!choices.length) continue;
-    return {
-      id: option.id,
-      label: option.label || 'Reasoning',
-      default: choices.find((choice) => choice.id === option.currentValue)?.id || choices.find((choice) => choice.isDefault)?.id,
-      choices: choices.map((choice) => ({ id: choice.id, label: choice.label || choice.id })),
-    };
-  }
-}
-
-function selectionOptions(selection) {
-  const options = selection?.options;
-  if (Array.isArray(options)) return options.filter((option) => option?.id);
-  return Object.entries(options || {}).map(([id, value]) => ({ id, value }));
-}
-
-export function effectiveReasoning(model, selection) {
-  const descriptor = reasoningDescriptor(model);
-  const options = selectionOptions(selection);
-  const selected = descriptor
-    ? options.find((option) => option.id === descriptor.id)?.value ?? descriptor.default
-    : options.find((option) => REASONING_OPTION.test(option.id) && typeof option.value === 'string')?.value;
-  return typeof selected === 'string' ? selected : undefined;
-}
-
-function withReasoning(selection, model, effort) {
-  if (!effort) return selection;
-  const descriptor = reasoningDescriptor(model);
-  if (!descriptor?.choices.some((choice) => choice.id === effort)) {
-    throw new Error('That reasoning level is unavailable for this model');
-  }
-  if (effectiveReasoning(model, selection) === effort) return selection;
-  return {
-    ...selection,
-    options: [...selectionOptions(selection).filter((option) => option.id !== descriptor.id), { id: descriptor.id, value: effort }],
-  };
-}
-
-function sameModel(a, b) {
-  return !!a?.instanceId && !!a.model && a.instanceId === b?.instanceId && a.model === b?.model;
-}
-
 // Collapse the server's thread fields into the handful the game needs.
 export function threadStatus(t) {
   if (t.archivedAt || t.deletedAt) return 'archived';
@@ -115,6 +57,100 @@ export function isUnread(t) {
   const done = t.latestRunCompletedAt ? Date.parse(t.latestRunCompletedAt) : 0;
   const seen = t.lastVisitedAt ? Date.parse(t.lastVisitedAt) : 0;
   return done > seen;
+}
+
+// The model for a new thread: the project's or T3's default, T3's fallback, or else
+// the model of the latest thread in the project, then anywhere. T3 leaves the defaults
+// empty until someone picks one, and its own composer reuses the last model instead.
+// Models whose provider is switched off are skipped.
+export function pickModelSelection({ project, settings = {}, threads = [], providers } = {}) {
+  const enabled = (sel) => sel?.model && (!providers || providers.some((p) => p.instanceId === sel.instanceId && p.enabled));
+  for (const sel of [project?.defaultModelSelection, settings.defaultModelSelection, settings.fallbackModelSelection]) {
+    if (enabled(sel)) return sel;
+  }
+  const latest = threads
+    .filter((t) => !t.deletedAt && enabled(t.modelSelection))
+    .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0));
+  return (latest.find((t) => project && t.projectId === project.id) || latest[0])?.modelSelection || null;
+}
+
+// The models the game offers: every switched-on provider's current models, in T3's
+// order. Legacy models are left out to keep the list short; a thread already on one
+// still shows it.
+export function modelChoices(providers = []) {
+  const out = [];
+  for (const p of providers || []) {
+    if (!p?.enabled || !Array.isArray(p.models)) continue;
+    for (const m of p.models) {
+      if (!m?.slug || m.isLegacy) continue;
+      out.push({ instanceId: p.instanceId, model: m.slug, name: m.name || m.slug, provider: p.displayName || p.instanceId, effort: effortLevels(m) });
+    }
+  }
+  return out;
+}
+
+// The option that sets how hard a model reasons. Each provider names it its own way
+// (Codex "reasoningEffort", Claude "effort", OpenCode "variant").
+const EFFORT_IDS = new Set(['reasoningEffort', 'effort', 'variant']);
+
+function effortDescriptor(model) {
+  return model?.capabilities?.optionDescriptors?.find((d) => d?.type === 'select' && EFFORT_IDS.has(d.id) && Array.isArray(d.options));
+}
+
+// A model's reasoning levels as { id, options: [{ id, label }], default }, or
+// undefined when it has none. Levels that only work typed into a prompt
+// (Claude's "ultrathink") are left out.
+export function effortLevels(model) {
+  const d = effortDescriptor(model);
+  if (!d) return undefined;
+  const injected = new Set(d.promptInjectedValues || []);
+  const options = d.options.filter((o) => o?.id && !injected.has(o.id)).map((o) => ({ id: o.id, label: o.label || o.id.charAt(0).toUpperCase() + o.id.slice(1) }));
+  if (!options.length) return undefined;
+  const def = d.options.find((o) => o.isDefault && !injected.has(o.id))?.id ?? d.currentValue;
+  return { id: d.id, options, default: options.some((o) => o.id === def) ? def : options[0].id };
+}
+
+// The reasoning level a selection carries, if any.
+export function effortOf(selection) {
+  return selection?.options?.find((o) => EFFORT_IDS.has(o.id))?.value;
+}
+
+// `selection` with its reasoning level set to `effort` (a level id).
+export function withEffort(selection, effort, providers) {
+  if (!effort) return selection;
+  const model = providers?.find((p) => p.instanceId === selection.instanceId)?.models?.find((m) => m.slug === selection.model);
+  const name = model?.name || selection.model;
+  const levels = effortLevels(model);
+  if (!levels) throw new Error(`${name} has no reasoning levels to pick from.`);
+  if (!levels.options.some((o) => o.id === effort)) throw new Error(`${name} doesn't offer ${effort} reasoning. Pick another level.`);
+  const options = (selection.options || []).filter((o) => o.id !== levels.id);
+  return { ...selection, options: [...options, { id: levels.id, value: effort }] };
+}
+
+// A model the player picked in the game, as a full selection. Its options (reasoning
+// effort and the like) come from `candidates` (the selection T3 would have used, or
+// the thread's current one) when that is the same model, else from the latest thread
+// on it, so picking a model keeps what was last chosen for it in T3. With neither, T3
+// applies the model's defaults.
+export function chosenModelSelection({ instanceId, model }, { providers, candidates = [], threads = [] } = {}) {
+  if (!instanceId || !model) throw new Error('no model picked');
+  const provider = providers?.find((p) => p.instanceId === instanceId);
+  if (providers && !provider?.enabled) throw new Error(`${provider?.displayName || instanceId} is switched off in T3 Code. Pick another model.`);
+  if (Array.isArray(provider?.models) && !provider.models.some((m) => m.slug === model)) {
+    throw new Error(`${provider.displayName || instanceId} no longer offers ${model}. Pick another model.`);
+  }
+  const same = (sel) => sel?.instanceId === instanceId && sel?.model === model;
+  let options = candidates.find(same)?.options;
+  if (!options) {
+    // Latest by activity, the order the game sees threads in, so its picker shows
+    // the level this carries over.
+    const active = (t) => Date.parse(t.activityRunStartedAt || t.latestRunStartedAt || t.updatedAt || t.createdAt || 0);
+    const latest = threads
+      .filter((t) => !t.deletedAt && same(t.modelSelection))
+      .sort((a, b) => active(b) - active(a))[0];
+    options = latest?.modelSelection.options;
+  }
+  return options ? { instanceId, model, options } : { instanceId, model };
 }
 
 export class T3Client extends EventEmitter {
@@ -323,8 +359,7 @@ export class T3Client extends EventEmitter {
       if (!t || t.lineage?.parentThreadId) return;
       const prev = this.threads.get(t.id);
       this.threads.set(t.id, t);
-      if (!prev || prev.updatedAt !== t.updatedAt || threadStatus(prev) !== threadStatus(t)
-        || !isDeepStrictEqual(prev.modelSelection, t.modelSelection)) {
+      if (!prev || prev.updatedAt !== t.updatedAt || threadStatus(prev) !== threadStatus(t)) {
         this.emit('change', { kind: 'thread', id: t.id, prev, thread: t });
       }
     } else if (item.kind === 'thread.removed') {
@@ -346,11 +381,10 @@ export class T3Client extends EventEmitter {
       this.config = item.config;
     } else if (this.config && item.config) {
       this.config = { ...this.config, ...item.config };
-    } else if (this.config) {
-      const providers = item.providers || item.payload?.providers;
-      const settings = item.payload?.settings;
-      if (providers) this.config.providers = providers;
-      if (settings) this.config.settings = settings;
+    } else if (this.config && item.providers) {
+      this.config.providers = item.providers;
+    } else if (this.config && item.payload?.providers) {
+      this.config.providers = item.payload.providers;
     }
     this.emit('config');
   }
@@ -370,58 +404,10 @@ export class T3Client extends EventEmitter {
     return this.http(`/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`).then((d) => d.projection);
   }
 
-  defaultModelSelection(projectId) {
-    return this.projects.get(projectId)?.defaultModelSelection || this.config?.settings?.defaultModelSelection;
-  }
-
-  modelCatalog() {
-    return (this.config?.providers || []).filter(selectableProvider).map((provider) => ({
-      id: provider.instanceId,
-      label: provider.displayName || provider.instanceId,
-      locked: provider.requiresNewThreadForModelChange === true || undefined,
-      models: (provider.models || []).filter(selectableModel).map((model) => ({
-        id: model.slug, label: model.shortName || model.name || model.slug, effort: reasoningDescriptor(model),
-      })),
-    })).filter((provider) => provider.models.length);
-  }
-
-  validateModelSelection(selection) {
-    if (!selection.instanceId || !selection.model) throw new Error('Choose an agent and a model');
-    const provider = this.config?.providers?.find((p) => p?.instanceId === selection.instanceId);
-    const model = selectableProvider(provider) && provider.models?.find((m) => selectableModel(m)
-      && (m.slug === selection.model || m.aliases?.includes(selection.model)));
-    if (!model) {
-      throw new Error('That agent or model is unavailable on this T3 Code machine');
-    }
-    return model;
-  }
-
   // ---- writes --------------------------------------------------------------
 
   dispatch(command) {
     return this.request('orchestration.dispatchCommand', { commandId: randomUUID(), ...command });
-  }
-
-  async setThreadModel(threadId, selection, effort) {
-    const thread = this.threads.get(threadId);
-    if (!thread) throw new Error('That thread is no longer available');
-    const same = sameModel(thread.modelSelection, selection);
-    if (same && !effort) return;
-    const model = this.validateModelSelection(selection);
-    const base = same ? thread.modelSelection : selection;
-    const modelSelection = withReasoning(base, model, effort);
-    if (same && modelSelection === base) return;
-    // T3 can detach the live provider session even for a same-agent model change.
-    if (thread.activeRunId || thread.activityRunStatus || WORKING.has(thread.status) || thread.pendingRuntimeRequest) {
-      throw new Error('Wait for the current run or request to finish before changing the model selection');
-    }
-    const instanceId = thread.modelSelection?.instanceId || thread.providerInstanceId;
-    const switching = instanceId && instanceId !== modelSelection.instanceId;
-    if (switching) {
-      const current = this.config?.providers?.find((p) => p?.instanceId === instanceId);
-      if (current?.requiresNewThreadForModelChange) throw new Error('Start a new thread to switch from this agent');
-    }
-    return this.dispatch({ type: switching ? 'provider.switch' : 'thread.model-selection.set', threadId, modelSelection });
   }
 
   sendMessage(threadId, text, mode = 'auto', attachments = []) {
@@ -442,15 +428,26 @@ export class T3Client extends EventEmitter {
     });
   }
 
-  // opts: { title, modelSelection, effort, runtimeMode, interactionMode }
+  // The model a new thread in `projectId` gets when the player doesn't pick one.
+  defaultModelFor(projectId) {
+    return pickModelSelection({
+      project: this.projects.get(projectId),
+      settings: this.config?.settings || {},
+      threads: [...this.threads.values()],
+      providers: this.config?.providers,
+    });
+  }
+
+  // opts: { title, model ({ instanceId, model }), effort (a reasoning level id), runtimeMode ('full-access' | 'approval-required' | ...), interactionMode ('default' | 'plan') }
   launchThread(projectId, text, attachments = [], opts = {}) {
     const settings = this.config?.settings || {};
-    const defaultSelection = this.defaultModelSelection(projectId);
-    const selected = opts.modelSelection;
-    const base = selected && !sameModel(selected, defaultSelection) ? selected : defaultSelection;
-    if (!base) throw new Error('T3 has no default model configured');
-    const model = selected || opts.effort ? this.validateModelSelection(base) : undefined;
-    const modelSelection = withReasoning(base, model, opts.effort);
+    const auto = this.defaultModelFor(projectId);
+    const providers = this.config?.providers;
+    let modelSelection = opts.model
+      ? chosenModelSelection(opts.model, { providers, candidates: [auto], threads: [...this.threads.values()] })
+      : auto;
+    if (!modelSelection) throw new Error('No model to start a thread with. Pick a default model in T3 Code settings, or start one thread there first.');
+    modelSelection = withEffort(modelSelection, opts.effort, providers);
     const firstLine = text.split('\n')[0].trim();
     const title = firstLine.length > 60 ? firstLine.slice(0, 57) + '...' : firstLine || 'New thread';
     return this.request('orchestration.launchThread', {
@@ -497,6 +494,19 @@ export class T3Client extends EventEmitter {
 
   respondAnswers(threadId, requestId, answers) {
     return this.dispatch({ type: 'runtime-request.respond', threadId, requestId, answers });
+  }
+
+  // Switch a thread to another model; T3 uses it from the next run on.
+  setModel(threadId, instanceId, model, effort) {
+    const t = this.threads.get(threadId);
+    if (!t) throw new Error('that thread is gone');
+    const providers = this.config?.providers;
+    const modelSelection = withEffort(
+      chosenModelSelection({ instanceId, model }, { providers, candidates: [t.modelSelection], threads: [...this.threads.values()] }),
+      effort,
+      providers,
+    );
+    return this.dispatch({ type: 'thread.model-selection.set', threadId, modelSelection });
   }
 
   settle(threadId) {

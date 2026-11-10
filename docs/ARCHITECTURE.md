@@ -1,9 +1,9 @@
 # Architecture
 
 ```
- WoW: Forever (Wine)                                   t3code-wow bridge (Node, user service)
+ WoW: Forever (Wine or macOS)                          t3code-wow bridge (Node, user service)
  ┌──────────────────────────────┐   pixels   ┌────────────────────────────────────────┐
- │ T3Code addon                 │──────────▶│ capture.js  grim / import, decode strip │
+ │ T3Code addon                 │──────────▶│ capture.js  grim, KWin, import, macOS   │
  │  Transport.lua  strip, queue │            │ bridge.js   commands, pacing, snapshots │
  │  Store.lua      snapshot     │◀──────────│ slots.js    Inbox.lua into T3Code_S###  │
  │  UI/*           window,      │   files    │             Signals/NNNNN.wav           │
@@ -75,12 +75,13 @@ so a border or scaling quirk doesn't break it.
 The payload is records separated by `RS` (0x1E), with fields separated by `US` (0x1F):
 
 ```
-H  1  session  ui  nextSlot  sigNext  gen  flags  viewThreadId  addonVersion
+H  1  session  ui  nextSlot  sigNext  gen  flags  viewThreadId  addonVersion  slotCount  modelsHash
 C  id  verb  args…                      (one per queued command)
 ```
 
 - `session` is persistent (SavedVariables). `ui` is new every load, so the bridge can
   tell a `/reload` happened.
+- `modelsHash` is the hash of the model list the addon holds (empty until it has one). The bridge sends the list, several KB, only while this differs from its own, so it costs one publish after a `/reload` or a change in T3 Code instead of every publish.
 - `flags`:
   - `o`: window open
   - `t`: tracker on
@@ -89,7 +90,7 @@ C  id  verb  args…                      (one per queued command)
   - `s`: sound signals unavailable
 - Verbs:
   - `send`, `new`, `stop`
-  - `model` carries the thread ID, agent ID, model ID and an optional reasoning level. `new` can also carry an explicit selection and reasoning level.
+  - `model` (`threadId instanceId model [effort]`). `new` takes the same `instanceId model [effort]` after its text; without a model T3 Code's own default applies, and an empty `instanceId model` with an `effort` sets only the reasoning level on that default. `effort` is a level id from the model's list (`low`, `high`, …); without it the thread keeps the options last used with that model
   - `settle`, `unsettle`, `archive`, `read`
   - `approve`, `answer`
   - `speak`, `say`, `hush`, `dictate`
@@ -100,6 +101,10 @@ change such as opening the window or switching threads, or a queued command. It 
 redrawn when content changes and hidden as soon as a snapshot acknowledges its
 sequence number, usually in under a second. If nothing answers for 20 s, it hides and
 retries with backoff.
+
+**macOS.** The bridge finds the game window in CoreGraphics' window list (through a JXA script run by `osascript`, so there's nothing to compile) and captures the corner with `screencapture -R`, which returns physical pixels on a Retina display. The strip can start below the window's top: under a windowed game's title bar, or below the notch of a MacBook display in fullscreen. So the decoder searches 40 extra points down instead of guessing either height. Both tools run as the bridge, which needs the Screen Recording permission; the bridge asks for it when it starts.
+
+**KDE Plasma.** KWin doesn't implement wlroots' screencopy, so `grim` can't read it. The bridge uses KWin's D-Bus API through `busctl` (part of systemd): `org.kde.krunner1.Match` on `/WindowsRunner` lists windows captioned "World of Warcraft", `getWindowInfo` gives each one's frame geometry, pid, desktops and minimized state, and `org.kde.KWin.ScreenShot2.CaptureArea` writes the corner's raw pixels (a QImage format KWin names in its reply) into a pipe the bridge passes as fd 3. It asks for native resolution so the cells aren't resampled on a scaled display, and searches 40 pixels down for a windowed game's title bar, as on macOS. Screenshots use `CaptureWindow`, which renders the window even while it's covered. On KWin 6.8 these calls work without the `X-KDE-DBUS-Restricted-Interfaces` grant that Spectacle's desktop file carries; if a later KWin refuses them, the error shows in `t3code-wow status`.
 
 ## Bridge → game: slots and signals
 
@@ -124,7 +129,9 @@ for WoW markup (`|` → `||`), then markdown is turned into colors and bullets.
 A publish works like this:
 
 1. Build the snapshot: threads, projects, the viewed thread's messages, pending
-   question or approval, usage, bridge status, command results and the ack.
+   question or approval, usage, bridge status, command results and the ack. The
+   model list rides along only when the addon's `modelsHash` is out of date.
+   It is grouped per machine and provider, and each model points at one of a few shared sets of reasoning levels instead of carrying its own. Threads carry their reasoning level (`re`), projects the level their default model uses (`de`).
 2. Write it to the slots the addon will load next (from its last confirmed position
    to a little past the bridge's prediction) and to slots 1–3 (what a `/reload`
    bootstraps from).
@@ -183,7 +190,6 @@ When few slots remain, intervals stretch 2–4×. When they run out, the addon o
 - **Writes:** `orchestration.dispatchCommand` with `message.dispatch`, `run.interrupt`,
   `runtime-request.respond`, `thread.settle`, `thread.unsettle` and `thread.visit`;
   plus `orchestration.launchThread`.
-- The server config subscription supplies each machine's available agents and models. New threads can pass a `modelSelection` to `orchestration.launchThread`. Existing threads use `thread.model-selection.set` for a model change or `provider.switch` when changing agents.
 
 ## Controller
 

@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 import { RS, US } from './codec.js';
 import { StripCapture } from './capture.js';
 import { SlotBank } from './slots.js';
-import { threadStatus, isUnread, effectiveReasoning } from './t3.js';
+import { threadStatus, isUnread, effortOf } from './t3.js';
 import { Fleet } from './fleet.js';
 import { tokenProvider } from './auth.js';
 import { Voice } from './voice.js';
@@ -25,29 +25,13 @@ import { findWowProcess, processKey } from './wow.js';
 import { markdownToWow, markdownToSpeech, firstLine, escapeWow } from './format.js';
 import { loadOrCreateKey, deriveKeys, open as openSealed, ENCRYPTED_VERSION } from './strip-crypto.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.3.0';
 export const STATE_DIR = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local/state'), 't3code-wow');
 
 const sec = (iso) => (iso ? Math.floor(Date.parse(iso) / 1000) : undefined);
 
 const ACTIVE = new Set(['working', 'input', 'plan']);
 const ORDER = { input: 0, plan: 1, working: 2, failed: 3, open: 4, settled: 5 };
-
-function wowModelLabel(label) {
-  return escapeWow(String(label).replace(/\s+/g, ' ').slice(0, 80));
-}
-
-function modelFields(client, selection, instanceId = selection?.instanceId) {
-  const provider = instanceId && client.config?.providers?.find((p) => p?.instanceId === instanceId);
-  const model = selection?.model && provider?.models?.find((m) => m?.slug === selection.model || m?.aliases?.includes(selection.model));
-  return {
-    mi: instanceId,
-    m: selection?.model,
-    eff: effectiveReasoning(model, selection),
-    mil: instanceId ? wowModelLabel(provider?.displayName || instanceId) : undefined,
-    ml: selection?.model ? wowModelLabel(model?.shortName || model?.name || selection.model) : undefined,
-  };
-}
 
 export function activityLabel(projection) {
   if (!projection) return null;
@@ -175,6 +159,11 @@ export function proposedPlan(projection) {
   return plan ? plan.markdown : null;
 }
 
+// How the game names a model: instance and slug, joined by a tab (neither contains one).
+export function modelKey(instanceId, model) {
+  return `${instanceId}\t${model}`;
+}
+
 export function parseFrame(payload) {
   const records = payload.toString('utf8').split(RS).map((r) => r.split(US));
   const out = { hello: null, commands: [] };
@@ -191,6 +180,7 @@ export function parseFrame(payload) {
         view: f[8] || '',
         version: f[9] || '',
         slots: Number(f[10]) || 0,
+        models: f[11] || '',
       };
     } else if (f[0] === 'C') {
       out.commands.push({ id: Number(f[1]), verb: f[2], args: f.slice(3) });
@@ -242,7 +232,6 @@ export class Bridge {
     this.results = [];
     this.omarchyUsage = new OmarchyUsage({ log: this.log, onChange: () => this.markDirty('minor') });
     this.shots = new Map(); // thread key (or 'new') -> screenshots waiting for the next message
-    this.modelChanges = new Map(); // thread key -> pending model change
     this.lastPublishAt = 0;
     this.lastGen = this.persist.gen || 0;
     this.lastDigest = null;
@@ -295,6 +284,7 @@ export class Bridge {
     this.statusTimer = setInterval(() => this.writeStatus(), 3000);
     // Pick up new Omarchy usage records (the shell's Agents panel refreshes them).
     this.usageTimer = setInterval(() => this.omarchyUsage.refresh(this.usageInstances()), 60000);
+    this.capture.prepare();
     this.captureLoop();
   }
 
@@ -417,6 +407,8 @@ export class Bridge {
     c.confirmedAt = Date.now();
     this.persist.confirmedSlot = hello.slot;
     c.version = hello.version;
+    // Which model list the addon holds; it's only sent again when this differs.
+    c.modelsHash = hello.models;
     c.lastSeen = Date.now();
     this.persist.slotGuess = c.slotNext;
 
@@ -440,15 +432,13 @@ export class Bridge {
   // Commands from the game
 
   async runCommand(cmd) {
-    const [a0, a1, a2, a3, a4] = cmd.args;
+    const [a0, a1, a2] = cmd.args;
     this.log(`command ${cmd.id}: ${cmd.verb} ${cmd.verb === 'send' || cmd.verb === 'new' ? a0 : cmd.args.join(' ').slice(0, 80)}`);
     let ok = true;
     let msg = null;
     try {
       switch (cmd.verb) {
         case 'send': {
-          const modelChange = this.modelChanges.get(a0);
-          if (modelChange) await modelChange;
           const attachments = await this.takeShots(a0, a0);
           await this.t3.sendMessage(a0, a1, a2 || 'auto', attachments);
           msg = attachments.length ? `Sent with ${attachments.length} screenshot${attachments.length === 1 ? '' : 's'}` : 'Sent';
@@ -468,28 +458,23 @@ export class Bridge {
           ok = null;
           break;
         case 'new': {
+          // new <project> <text> [<instanceId> <model> [<effort>]]; the model is
+          // empty when only the reasoning level was picked.
           const attachments = await this.takeShots('new', a0);
-          const opts = a2 || a3 || a4 ? {} : undefined;
-          if (a2 || a3) opts.modelSelection = { instanceId: a2, model: a3 };
-          if (a4) opts.effort = a4;
+          const [, , instanceId, model, effort] = cmd.args;
+          const opts = {};
+          if (instanceId && model) opts.model = { instanceId, model };
+          if (effort) opts.effort = effort;
           const res = await this.t3.launchThread(a0, a1, attachments, opts);
           msg = 'Thread started';
           if (res?.threadId) this.results.push({ id: cmd.id, ok: true, open: res.threadId });
           break;
         }
-        case 'model': {
-          const previous = this.modelChanges.get(a0);
-          const change = Promise.resolve(previous).catch(() => {})
-            .then(() => this.t3.setThreadModel(a0, { instanceId: a1, model: a2 }, a3));
-          this.modelChanges.set(a0, change);
-          try {
-            await change;
-          } finally {
-            if (this.modelChanges.get(a0) === change) this.modelChanges.delete(a0);
-          }
-          msg = 'Model selection updated';
+        case 'model':
+          // model <thread> <instanceId> <model> [<effort>]
+          await this.t3.setModel(a0, a1, a2, cmd.args[3] || undefined);
+          msg = 'Model changed';
           break;
-        }
         case 'stop':
           await this.t3.interrupt(a0);
           msg = 'Stopped';
@@ -568,7 +553,7 @@ export class Bridge {
     const v = this.voice;
     const viaOmarchy = v.canOmarchyDictate();
     if (!viaOmarchy && !v.canTranscribe()) {
-      throw new Error('no dictation backend; pick one in Omarchy > Setup > Defaults > Dictation');
+      throw new Error(v.dictationHint());
     }
     if (action === 'start') {
       if (viaOmarchy) v.startOmarchy();
@@ -733,18 +718,6 @@ export class Bridge {
 
   buildSnapshot() {
     const t3 = this.t3;
-    const primary = t3.local.client;
-    const catalogs = t3.envs.map(({ code, client }) => [code, client.modelCatalog().map((p) => ({
-      ...p,
-      label: wowModelLabel(p.label),
-      models: p.models.map((m) => ({
-        ...m, label: wowModelLabel(m.label),
-        effort: m.effort && {
-          ...m.effort, label: wowModelLabel(m.effort.label),
-          choices: m.effort.choices.map((choice) => ({ ...choice, label: wowModelLabel(choice.label) })),
-        },
-      })),
-    }))]);
     const projects = [];
     const usedProjects = new Set();
     let threads = [...t3.threads.values()]
@@ -777,8 +750,9 @@ export class Bridge {
         st: sec(t.activityRunStartedAt || t.latestRunStartedAt),
         un: s !== 'settled' && isUnread(t) ? true : undefined,
         br: t.branch ? escapeWow(t.branch) : undefined,
-        ...modelFields(t._env?.client || primary, t.modelSelection, t.modelSelection?.instanceId || t.providerInstanceId),
-        e: t._env?.code || undefined,
+        m: t.modelSelection?.model,
+        mi: t.modelSelection?.instanceId,
+        re: effortOf(t.modelSelection),
         env: t._env && !t._env.local ? escapeWow(t._env.label) : undefined,
         last: last && ACTIVE.has(s) === false && s !== 'settled' ? escapeWow(firstLine(last, 160)) : undefined,
       };
@@ -787,14 +761,15 @@ export class Bridge {
       if (p.archivedAt) continue;
       const remote = p._env && !p._env.local ? p._env.label : null;
       const name = p.title || p.repositoryIdentity?.displayName || 'Project';
-      const client = p._env?.client || primary;
+      const dm = t3.defaultModelFor(p.id);
       projects.push({
         id: p.id,
         name: escapeWow(remote ? `${name} · ${remote}` : name),
-        ...modelFields(client, p.defaultModelSelection || client.defaultModelSelection()),
-        e: p._env?.code || undefined,
         env: remote ? escapeWow(remote) : undefined,
         act: usedProjects.has(p.id) || undefined,
+        // The model a new thread here gets unless the player picks one.
+        dm: dm?.instanceId && dm.model ? modelKey(dm.instanceId, dm.model) : undefined,
+        de: effortOf(dm),
       });
     }
     projects.sort((a, b) => (b.act ? 1 : 0) - (a.act ? 1 : 0) || a.name.localeCompare(b.name));
@@ -833,6 +808,9 @@ export class Bridge {
       }
     }
 
+    const voice = this.voice.describe();
+    const models = this.modelsSection();
+
     const usage = [];
     this.omarchyUsage.refresh(this.usageInstances());
     const enabled = (t3.config?.providers || []).filter((p) => p.enabled && (p.usageLimits || this.omarchyUsage.forInstance(p.instanceId)));
@@ -847,23 +825,52 @@ export class Bridge {
         t3err: t3.error ? escapeWow(t3.error) : undefined,
         server: t3.config?.environment?.serverVersion,
         host: t3.config?.environment?.label,
-        tts: this.voice.describe().tts || undefined,
-        dictation: this.voice.describe().dictation || undefined,
+        tts: voice.tts || undefined,
+        dictation: voice.dictation || undefined,
+        dictationHint: voice.hint || undefined,
         slots: this.bank.slots,
-        ...modelFields(primary, primary.defaultModelSelection()),
         envs: t3.envs.length > 1 ? t3.environments().map((e) => ({ label: escapeWow(e.label), state: e.state, local: e.local, n: e.threads })) : undefined,
       },
       projects,
       threads: list,
-      models: catalogs[0][1].length ? catalogs[0][1] : undefined,
-      modelsByEnv: catalogs.length > 1 ? Object.fromEntries(catalogs.slice(1)) : undefined,
       older: t3.olderSettled || undefined,
       view,
       usage,
       dict: this.dictation,
       newShots: this.shots.get('new')?.length || undefined,
+      // ~100 models is several KB, so only when the addon doesn't hold this list yet.
+      models: models && this.client?.modelsHash !== models.h ? models : undefined,
       results: this.results.slice(-8).map(({ id, ok, msg, open }) => ({ id, ok, msg, open })),
     };
+  }
+
+  // Every machine's model list for the game's model picker, with a short hash the
+  // addon reports back in its hello. Per machine (`e`): its providers (`p`), each
+  // with its models, and the distinct sets of reasoning levels (`x`) those models
+  // point at by 1-based index (`r`), since most models of a provider share one.
+  modelsSection() {
+    const groups = this.t3
+      .modelGroups()
+      .filter((g) => g.choices.length)
+      .map((g) => {
+        const x = [];
+        const sets = new Map();
+        const providers = new Map();
+        for (const c of g.choices) {
+          let r;
+          if (c.effort) {
+            const set = { k: c.effort.id, d: c.effort.default, o: c.effort.options.map((o) => ({ i: o.id, l: escapeWow(o.label) })) };
+            const key = JSON.stringify(set);
+            if (!sets.has(key)) sets.set(key, x.push(set));
+            r = sets.get(key);
+          }
+          if (!providers.has(c.instanceId)) providers.set(c.instanceId, { i: c.instanceId, n: escapeWow(c.provider.replace(/\s+/g, ' ').trim()), m: [] });
+          providers.get(c.instanceId).m.push({ s: c.model, l: escapeWow(c.name), r });
+        }
+        return { e: g.code, x, p: [...providers.values()] };
+      });
+    // An empty list still gets a hash, so the addon drops models that are gone.
+    return { h: createHash('sha1').update(JSON.stringify(groups)).digest('hex').slice(0, 8), g: groups };
   }
 
   // ---------------------------------------------------------------------------

@@ -12,10 +12,10 @@ export function findWindowsWowProcesses() {
   try {
     const script = String.raw`
       [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-      foreach ($game in (Get-Process -Name Wow -ErrorAction SilentlyContinue)) {
+      foreach ($game in (Get-Process -Name Wow,Wow-ARM64 -ErrorAction SilentlyContinue)) {
         try {
           $exe = $game.Path
-          if ($exe -match '[\\/]_forever_[\\/]Wow\.exe$') {
+          if ($exe -match '[\\/]_forever_[\\/]Wow(-ARM64)?\.exe$') {
             $start = ([DateTimeOffset]$game.StartTime).ToUnixTimeMilliseconds()
             [Console]::WriteLine('{0} {1} {2}', $game.Id, $start, $exe)
           }
