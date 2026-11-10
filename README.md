@@ -3,7 +3,7 @@
 Watch and run your [T3 Code](https://t3.codes) agent threads without leaving the game. It's a native addon for World of Warcraft: Forever, built from Blizzard's own UI templates so it looks and plays like the rest of the interface, plus a small bridge that connects it to T3 Code.
 
 > [!WARNING]
-> **Early release, still experimental.** It's built for and tested on one setup: **Omarchy 4.5.0**, **T3 Code Nightly** (0.1.7-nightly) and **World of Warcraft: Forever** (1.60.x) under Proton. **macOS** with the native client and **CachyOS** with KDE Plasma are new and less tested (see [macOS](#macos) and [CachyOS and KDE Plasma](#cachyos-and-kde-plasma)). Other setups may work but aren't supported yet. T3 Code Nightly's API changes often, so a T3 update can break things until this catches up. Expect rough edges, and please [report them](https://github.com/ryanrhughes/t3code-wow/issues).
+> **Early release, still experimental.** Upstream targets Omarchy 4.5.0 with WoW: Forever 1.60.x under Proton and also documents macOS and CachyOS. This fork adds Windows support on `windows-bridge`. T3 Code Nightly's API can change between releases.
 
 ## What it does
 
@@ -19,9 +19,7 @@ Watch and run your [T3 Code](https://t3.codes) agent threads without leaving the
 
 ## Install on Windows
 
-The `windows-bridge` branch adds native Windows support to this fork.
-
-You need [Git for Windows](https://git-scm.com/download/win), [Node.js 22 or newer](https://nodejs.org/en/download), WoW: Forever, and a running T3 Code Nightly server. Reopen PowerShell after installing Node so it picks up the updated PATH.
+You need WoW: Forever, a running T3 Code Nightly server using orchestration protocol 2, Git for Windows, and Node.js 22 or newer. Reopen PowerShell after installing Node so it picks up the updated PATH. [Git for Windows](https://git-scm.com/download/win) · [Node.js](https://nodejs.org/en/download)
 
 ```powershell
 git clone --branch windows-bridge https://github.com/sdurban/t3code-wow.git
@@ -30,16 +28,20 @@ cd t3code-wow
 ```
 
 1. Choose **Install or update**. Press Enter to accept the detected WoW folder, or enter the path to your WoW folder, `_forever_`, or `Interface\AddOns`.
-2. On the computer running T3 Code, enable **Network access** if you are connecting over your local network. Create a one-time pairing link in its terminal.
+2. If T3 Code runs on another computer on your LAN, enable **Network access** on that computer under **Settings → Sharing & access**. Create a one-time pairing link on the T3 Code host. [T3 Code remote access](https://github.com/pingdotgg/t3code/blob/main/docs/user/remote-access.md#pair-over-a-lan-or-private-network)
 
    ```bash
    t3 pair --scope orchestration:read --scope orchestration:operate --label 'WoW bridge Windows'
    ```
 
-3. Choose **Start bridge** and paste the complete pairing link, including the `#token=…` part, into the hidden prompt. The launcher stores the resulting session encrypted for your Windows account. On later starts, press Enter to reconnect. Keep the launcher open while you play.
-4. On the first install, fully close and reopen WoW: Forever so it sees the addon and its update slots. Log in, keep the game in the foreground, and type `/t3`.
+3. Choose **Start bridge** and paste the full web pairing URL with `/pair#token=…` into the hidden prompt. Use an HTTPS URL or an HTTP URL with a private IP address. A loopback URL works when T3 Code runs on the same computer. The launcher saves the session encrypted for your Windows account. Press Enter on later starts to reconnect, or paste a fresh link if the session expires or the host address changes. Keep the bridge running while you play.
+4. On the first install, fully close and reopen WoW: Forever so it finds the addon and its update slots. Keep the `T3Code_S###` folders installed. Log in, bring WoW to the foreground, and type `/t3`. Game sound enables faster updates. With sound off, the addon polls for changes.
 
-To update, stop the bridge with Ctrl+C, run `git pull --ff-only` in the checkout, and choose **Install or update** again. Start the bridge and use `/reload` in WoW. Your saved session is reused. Choose **Status** or use `/t3 selftest` to check the link. To remove the addon and local settings, choose **Uninstall**. You can revoke the corresponding session in T3 Code on the server.
+### Update on Windows
+
+Stop the bridge with Ctrl+C, run `git pull --ff-only` in the checkout, and choose **Install or update** again. Start the bridge and press Enter to reuse your saved session. Follow the installer's **Next** instruction for WoW. Usually this is `/reload`, but a full restart is needed when the installer adds slot folders or signal files that WoW needs to discover at launch.
+
+### Windows commands and diagnostics
 
 The menu also accepts commands from PowerShell.
 
@@ -49,7 +51,19 @@ The menu also accepts commands from PowerShell.
 .\T3Code-WoW.cmd status
 ```
 
+Use **Status** and `/t3 selftest` to check the link. If live updates are paused because the slots ran out, use `/reload`.
+
+To test screen capture, run the delayed probe below, then switch back to WoW and open `/t3` or select a thread before the capture. The game must be in the foreground. The strip is only drawn while WoW is waiting for the bridge to acknowledge an action.
+
+```powershell
+Start-Sleep -Seconds 3; .\T3Code-WoW.cmd probe
+```
+
+To uninstall, stop the bridge, close WoW, choose **Uninstall**, and confirm. This removes the addon, its slots, and the local settings. Revoke the Windows session on the T3 Code host under **Settings → Sharing & access** to end its access. [T3 Code session management](https://github.com/pingdotgg/t3code/blob/main/docs/user/remote-access.md#manage-or-revoke-access)
+
 ## Requirements
+
+The following requirements and shell installer apply to Linux and macOS.
 
 - **Omarchy 4.5.0** (Hyprland), **CachyOS** with KDE Plasma (see [CachyOS and KDE Plasma](#cachyos-and-kde-plasma)), or **macOS** (see [macOS](#macos)). On Omarchy the bridge reads the game window with Hyprland's screen capture, and dictation and usage come from Omarchy's own tools.
 - **T3 Code Nightly**, installed and running. Its `t3` command gives the bridge a login.
@@ -109,10 +123,13 @@ This removes the addon and its update folders, its settings in the game, the bri
 
 - `/t3` opens or closes the window. You can also use the minimap button, the game menu (Esc), or hold both triggers and press Back on a controller.
 - `/t3 new` starts a thread, `/t3 usage` opens the usage tab, `/t3 settings` the settings.
+- The model selector is in the thread header. The reasoning control appears alongside it for models that offer reasoning levels.
 - `/t3 unlock` lets you drag the tracker section somewhere else; Settings → Reset tracker puts it back under your quests.
-- To see threads from another machine on your tailnet, run `t3code-wow env add <host>`. It finds the machine's T3 Code over Tailscale and creates a session for the bridge over SSH.
+- On Linux and macOS, use `t3code-wow env add <host>` to add a machine on your tailnet. It finds the machine's T3 Code over Tailscale and creates a session for the bridge over SSH.
 
 ## Commands
+
+On Windows, use the [Windows launcher commands](#windows-commands-and-diagnostics).
 
 ```bash
 t3code-wow status         # what the bridge sees: T3 Code, the game, the screen link, the addon
@@ -123,7 +140,7 @@ t3code-wow uninstall      # remove everything (see above)
 
 ## When something's wrong
 
-1. Run `t3code-wow status --log` and check each line.
+1. On Windows, choose **Status** in the launcher. On Linux and macOS, run `t3code-wow status --log`.
 2. In game, run `/t3 selftest`. It checks each step between the game and T3 Code and says which one fails.
 3. `/t3 report` fills the T3 Code message box with diagnostics and attaches a screenshot of your game. Send it to an agent, or copy the text into an issue.
 
@@ -135,7 +152,7 @@ Addons can't open network connections or read files, so the addon and the bridge
 
 | Direction | How |
 | --- | --- |
-| Game → bridge | A small strip of coloured squares in the top-left corner for about a second after you do something. The bridge reads it with a screen capture (`grim` on Hyprland, KWin's D-Bus screenshot interface on KDE Plasma, `screencapture` on macOS). |
+| Game → bridge | A small strip of coloured squares in the top-left corner for about a second after you do something. The bridge reads it with a screen capture (`grim` on Hyprland, KWin's D-Bus screenshot interface on KDE Plasma, `screencapture` on macOS, or Win32 foreground capture on Windows). |
 | Bridge → game | Load-on-demand "slot" addons. The game reads a slot's Lua from disk when it loads, so the bridge writes a fresh snapshot there first. |
 | "New data" signal | Large silent sound files the bridge fills or empties. The game re-reads big sounds every time it plays them, so the addon knows when to load the next slot. |
 

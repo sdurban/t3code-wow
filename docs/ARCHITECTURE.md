@@ -1,9 +1,9 @@
 # Architecture
 
 ```
- WoW: Forever (Wine or macOS)                          t3code-wow bridge (Node, user service)
+ WoW: Forever (Wine, macOS or Windows)                 t3code-wow bridge (Node)
  ┌──────────────────────────────┐   pixels   ┌────────────────────────────────────────┐
- │ T3Code addon                 │──────────▶│ capture.js  grim, KWin, import, macOS   │
+ │ T3Code addon                 │──────────▶│ capture.js  platform screen capture    │
  │  Transport.lua  strip, queue │            │ bridge.js   commands, pacing, snapshots │
  │  Store.lua      snapshot     │◀──────────│ slots.js    Inbox.lua into T3Code_S###  │
  │  UI/*           window,      │   files    │             Signals/NNNNN.wav           │
@@ -43,9 +43,7 @@ frames (all of them, once the addon has its keys) carry
 nonce(12)  ChaCha20(records)  HMAC-SHA-256(version, seq, nonce, ciphertext)[0..8]
 ```
 
-- The bridge makes a random master key per install (`~/.local/state/t3code-wow/strip.key`,
-  mode 0600) and derives an encryption key and a MAC key from it. Both go into every
-  snapshot it writes to the slots. Slot files are never on screen.
+- The bridge makes a random master key per install and derives an encryption key and a MAC key from it. Both go into every snapshot it writes to the slots. Slot files are never on screen. The key is normally in `~/.local/state/t3code-wow/strip.key` with mode 0600 on Linux and macOS. The Windows launcher puts it in `%LOCALAPPDATA%\T3CodeWoW\state\t3code-wow\strip.key`.
 - The addon keeps the keys in file-local variables in `Transport.lua`. They aren't on
   the exported `T3Code` table and aren't saved. The slot global is cleared on load.
 - Nonces are a per-load prefix (time and random bytes) plus a counter, and a frame is
@@ -105,6 +103,8 @@ retries with backoff.
 **macOS.** The bridge finds the game window in CoreGraphics' window list (through a JXA script run by `osascript`, so there's nothing to compile) and captures the corner with `screencapture -R`, which returns physical pixels on a Retina display. The strip can start below the window's top: under a windowed game's title bar, or below the notch of a MacBook display in fullscreen. So the decoder searches 40 extra points down instead of guessing either height. Both tools run as the bridge, which needs the Screen Recording permission; the bridge asks for it when it starts.
 
 **KDE Plasma.** KWin doesn't implement wlroots' screencopy, so `grim` can't read it. The bridge uses KWin's D-Bus API through `busctl` (part of systemd): `org.kde.krunner1.Match` on `/WindowsRunner` lists windows captioned "World of Warcraft", `getWindowInfo` gives each one's frame geometry, pid, desktops and minimized state, and `org.kde.KWin.ScreenShot2.CaptureArea` writes the corner's raw pixels (a QImage format KWin names in its reply) into a pipe the bridge passes as fd 3. It asks for native resolution so the cells aren't resampled on a scaled display, and searches 40 pixels down for a windowed game's title bar, as on macOS. Screenshots use `CaptureWindow`, which renders the window even while it's covered. On KWin 6.8 these calls work without the `X-KDE-DBUS-Restricted-Interfaces` grant that Spectacle's desktop file carries; if a later KWin refuses them, the error shows in `t3code-wow status`.
+
+**Windows.** The capture worker uses Windows PowerShell and Win32 to locate the foreground game window and read physical pixels from its client area. Capture reports the window as hidden when WoW loses focus. Windows can temporarily lock signal files while the game is using them, so the bridge retries blocked renames with backoff.
 
 ## Bridge → game: slots and signals
 
@@ -181,6 +181,7 @@ When few slots remain, intervals stretch 2–4×. When they run out, the addon o
 
 - **Auth:** a session token from `t3 auth session issue --scope orchestration:read
   --scope orchestration:operate`, renewed a week before it expires.
+- The Windows launcher exchanges the pairing code for a bearer session with the same two scopes and saves the session using Windows DPAPI. The bridge connects directly to the saved server address. Pair again when the session expires or is revoked.
 - **Live data:** `POST /api/auth/websocket-ticket/rpc` gets a ticket, then
   `/ws?orchestrationProtocol=2` opens Effect RPC JSON frames.
 - **Subscriptions:** `orchestration.subscribeShell` (thread list, live) and

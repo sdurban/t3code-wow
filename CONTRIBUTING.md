@@ -4,6 +4,8 @@ Contributions are welcome. This is an early, experimental release, so bug report
 
 The supported setup is **Omarchy 4.5.0**, **T3 Code Nightly** and **World of Warcraft: Forever** under Proton. macOS with the native client and CachyOS with KDE Plasma are also supported, with less testing. Changes that make other setups work are welcome, as long as they don't break those.
 
+The `windows-bridge` branch adds native Windows support. Include the launcher’s **Status** output and relevant lines from the bridge terminal when reporting a Windows issue. [Windows setup](README.md#install-on-windows)
+
 ## Issues
 
 Open an issue for a bug you can reproduce, or for a specific idea. Keep it detailed but straightforward: say what happened, plainly, and leave out the essay.
@@ -35,6 +37,8 @@ cd t3code-wow
 ```
 
 After editing, run `./install.sh` from your checkout, then `/reload` in game. It copies your checkout over the installed copy, puts the addon into the game and restarts the bridge. (`t3code-wow sync` only re-copies the *installed* addon, so it won't pick up your edits.) New files inside the addon load on `/reload`; new addon folders (such as live-update slots) need a full game restart.
+
+On Windows, stop the running bridge, open `T3Code-WoW.cmd` from the checkout, and choose **Install or update**. Start the bridge again and follow the **Next** instruction for WoW. Run `npm test` from `bridge` with Node.js and `lua5.1` on `PATH`.
 
 Tests:
 
