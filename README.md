@@ -11,7 +11,7 @@ Watch and run your [T3 Code](https://t3.codes) agent threads without leaving the
 - **Quest tracker**: what's running, what needs you and what just finished, right under your quests, with live timers.
 - **Notices**: a toast, a sound and a chat line when a thread finishes or needs you. They wait until combat ends, and stay quiet in dungeons and raids if you like.
 - **Full controller support**: the D-pad moves between controls, A selects, B goes back, LB/RB switch tabs, X reads aloud and holding Y dictates. Hold both triggers and press Back to open it from anywhere.
-- **Voice**: dictate replies with Omarchy's dictation, and have replies read aloud by your desktop voice (on macOS, the system voice) or the game's.
+- **Voice**: dictate replies on Omarchy or Windows and have replies read aloud by your desktop voice or the game's.
 - **Screenshots**: attach what's on your screen to a message so the agent can see your game.
 - **Every machine**: threads from your other computers via T3 Connect, all in one list.
 - **Usage**: your providers' plans and limits, the same as Omarchy's Agents panel shows.
@@ -41,6 +41,12 @@ cd t3code-wow
 
 Stop the bridge with Ctrl+C, run `git pull --ff-only` in the checkout, and choose **Install or update** again. Start the bridge and press Enter to reuse your saved session. Follow the installer's **Next** instruction for WoW. Usually this is `/reload`, but a full restart is needed when the installer adds slot folders or signal files that WoW needs to discover at launch.
 
+### Voice on Windows
+
+Desktop speech uses the current Windows system voice. Choose **Desktop voice (via the bridge)** in the addon's settings to use it.
+
+For dictation, stop the bridge and choose **Install dictation** in `T3Code-WoW.cmd`. Setup downloads [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and a multilingual model (about 70 MB total). Restart the bridge and use the microphone button or hold **Y** on a controller. Windows records from the default microphone and whisper.cpp transcribes locally. If the microphone fails to open, check the default input and allow desktop apps to access the microphone in Windows settings.
+
 ### Windows commands and diagnostics
 
 The menu also accepts commands from PowerShell.
@@ -49,6 +55,7 @@ The menu also accepts commands from PowerShell.
 .\T3Code-WoW.cmd install -WowPath 'C:\Program Files (x86)\World of Warcraft'
 .\T3Code-WoW.cmd start
 .\T3Code-WoW.cmd status
+.\T3Code-WoW.cmd dictation
 ```
 
 Use **Status** and `/t3 selftest` to check the link. If live updates are paused because the slots ran out, use `/reload`.

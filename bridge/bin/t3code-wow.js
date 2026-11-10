@@ -393,8 +393,9 @@ async function cmdRun(args) {
     throw new Error('set T3_ORIGIN and T3_TOKEN for your T3 Code server before starting the Windows bridge');
   }
   const bridge = new Bridge({ addonsDir, config: { ...cfg, wowDir, verbose: args.verbose || cfg.verbose } });
-  const stop = () => {
-    bridge.stop();
+  const stop = async () => {
+    if (bridge.stopped) return;
+    await bridge.stop();
     process.exit(0);
   };
   process.on('SIGINT', stop);

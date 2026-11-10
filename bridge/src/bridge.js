@@ -218,7 +218,7 @@ export class Bridge {
     this.tokens = tokenProvider({ log: this.log });
     // Every T3 Code machine we show: this one, plus any added with `t3code-wow env add`.
     this.t3 = new Fleet({ localTokens: this.tokens, environments: config.environments || [], log: this.log });
-    this.voice = new Voice({ ttsCommand: config.tts?.command || null, rate: config.tts?.rate || 0, log: this.log });
+    this.voice = new Voice({ ttsCommand: config.tts?.command || null, rate: config.tts?.rate || 0, log: this.log, stateDir });
     this.stateDir = stateDir;
     this.stateFile = path.join(stateDir, 'state.json');
     this.statusFile = path.join(stateDir, 'status.json');
@@ -297,6 +297,7 @@ export class Bridge {
     this.t3.stop();
     this.capture.close?.();
     this.voice.hush();
+    return this.voice.cancelRecording();
   }
 
   checkProcess() {
@@ -567,15 +568,18 @@ export class Bridge {
       this.setDictation('cancelled');
       return;
     }
-    if (viaOmarchy ? !v.omarchy : !v.recording) return;
+    if (viaOmarchy ? !v.omarchy : !v.recording || v.recording.stopping) return;
     this.setDictation('transcribing');
+    const pending = this.dictation;
     const started = Date.now();
     (viaOmarchy ? v.stopOmarchy() : v.stopAndTranscribe())
       .then((text) => {
+        if (this.stopped || this.dictation !== pending) return;
         this.log(`dictation (${Date.now() - started} ms): ${text ? `"${text.slice(0, 80)}"` : '(nothing heard)'}`);
         this.setDictation(text ? 'done' : 'empty', text.replace(/\|/g, '/'));
       })
       .catch((err) => {
+        if (this.stopped || this.dictation !== pending) return;
         this.log(`dictation failed: ${err.message}`);
         this.setDictation('error', null, err.message);
       });

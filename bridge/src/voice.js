@@ -1,15 +1,19 @@
 // Text-to-speech and dictation on the desktop side.
 //
-// Speech: a configured command, else speech-dispatcher (`spd-say`), else espeak-ng,
-// else macOS's `say`.
+// Speech: a configured command, Windows or macOS system voices, or a Linux
+// speech-dispatcher (`spd-say`) or espeak-ng voice.
 // Dictation: record the mic with pw-record and transcribe with `voxtype transcribe`;
 // the bridge sends the text to the addon. Without those, fall back to Omarchy's
-// `omarchy-dictation`, which pastes into the focused window.
+// `omarchy-dictation`, which pastes into the focused window. On Windows, record
+// with the system microphone and transcribe locally with whisper.cpp.
 
 import { spawn, execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnWindowsPowerShell } from './windows.js';
+
+const WINDOWS_MODEL = 'ggml-base-q5_1.bin';
 
 const EXTRA_PATHS = [
   path.join(os.homedir(), '.local/share/omarchy/bin'),
@@ -19,7 +23,8 @@ const EXTRA_PATHS = [
 ];
 
 export function which(bin) {
-  for (const dir of [...(process.env.PATH || '').split(':'), ...EXTRA_PATHS]) {
+  const extras = process.platform === 'win32' ? [] : EXTRA_PATHS;
+  for (const dir of [...(process.env.PATH || '').split(path.delimiter), ...extras]) {
     if (!dir) continue;
     const p = path.join(dir, bin);
     try {
@@ -31,16 +36,18 @@ export function which(bin) {
 }
 
 export class Voice {
-  constructor({ ttsCommand = null, rate = 0, log = () => {} } = {}) {
+  constructor({ ttsCommand = null, rate = 0, log = () => {}, stateDir } = {}) {
     this.ttsCommand = ttsCommand; // e.g. "piper-say" or "my-tts --stdin"; text arrives on stdin
     this.rate = rate;
     this.log = log;
     this.current = null;
     this.dictating = false;
+    this.whisperDir = stateDir && path.join(stateDir, 'whisper');
   }
 
   ttsEngine() {
-    if (this.ttsCommand) return { kind: 'custom', cmd: this.ttsCommand };
+    if (this.ttsCommand) return { kind: 'custom', cmd: this.ttsCommand, name: 'custom' };
+    if (process.platform === 'win32') return { kind: 'windows', name: 'Windows speech' };
     const spd = which('spd-say');
     if (spd) return { kind: 'spd', cmd: spd };
     const espeak = which('espeak-ng') || which('espeak');
@@ -52,20 +59,20 @@ export class Voice {
 
   describe() {
     const e = this.ttsEngine();
+    const direct = process.platform === 'win32' ? 'whisper.cpp (Windows)' : 'voxtype';
     const dictation = this.canOmarchyDictate()
       ? `omarchy-dictation (${this.backendName() || 'no backend set'})`
-      : this.canTranscribe() ? 'voxtype' : null;
+      : this.canTranscribe() ? direct : null;
     return {
-      tts: e ? (e.kind === 'custom' ? 'custom' : path.basename(e.cmd)) : null,
+      tts: e ? (e.name || path.basename(e.cmd)) : null,
       dictation,
-      // What to tell the player when there is nothing to dictate with; Omarchy's
-      // dictation setup only exists on Linux.
       hint: dictation ? null : this.dictationHint(),
     };
   }
 
   dictationHint(platform = process.platform) {
     if (platform === 'darwin') return "Dictation isn't available on macOS yet.";
+    if (platform === 'win32') return 'Choose Install dictation in T3Code-WoW.cmd, then restart the bridge.';
     return 'No dictation backend found; pick one in Omarchy > Setup > Defaults > Dictation.';
   }
 
@@ -76,7 +83,7 @@ export class Voice {
       } catch {}
       this.current = null;
     }
-    const spd = which('spd-say');
+    const spd = process.platform !== 'win32' && which('spd-say');
     if (spd) spawn(spd, ['--cancel'], { stdio: 'ignore' }).on('error', () => {});
   }
 
@@ -91,7 +98,22 @@ export class Voice {
     this.hush();
     let child;
     if (engine.kind === 'custom') {
-      child = spawn('/bin/sh', ['-c', engine.cmd], { stdio: ['pipe', 'ignore', 'ignore'] });
+      child = spawn(engine.cmd, { shell: true, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
+      child.stdin.end(text);
+    } else if (engine.kind === 'windows') {
+      const script = fs.readFileSync(new URL('./speech-windows.ps1', import.meta.url), 'utf8');
+      child = spawnWindowsPowerShell(script, {
+        env: { ...process.env, T3WOW_SPEECH_RATE: String(this.rate) },
+        stdio: ['pipe', 'ignore', 'pipe'],
+      });
+      let stderr = '';
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-2048); });
+      child.on('close', (code) => {
+        if (this.current !== child || !code) return;
+        this.log(`speak: ${stderr.trim() || `Windows speech exited with code ${code}`}`);
+      });
+      child.stdin.on('error', () => {});
       child.stdin.end(text);
     } else if (engine.kind === 'spd') {
       const args = ['--wait', '-e'];
@@ -111,7 +133,7 @@ export class Voice {
       child.stdin.end(text);
     }
     child.on('error', (err) => this.log(`speak: ${err.message}`));
-    child.on('exit', () => {
+    child.on('close', () => {
       if (this.current === child) this.current = null;
     });
     this.current = child;
@@ -126,7 +148,7 @@ export class Voice {
   // watch the clipboard and hand the text to the addon ourselves.
 
   canOmarchyDictate() {
-    return !!(which('omarchy-dictation') && which('wl-paste'));
+    return process.platform !== 'win32' && !!(which('omarchy-dictation') && which('wl-paste'));
   }
 
   backendName() {
@@ -234,11 +256,16 @@ export class Voice {
   }
 
   canTranscribe() {
+    if (process.platform === 'win32') {
+      return !!this.whisperDir && ['whisper-cli.exe', WINDOWS_MODEL].every((file) =>
+        fs.statSync(path.join(this.whisperDir, file), { throwIfNoEntry: false })?.isFile());
+    }
     return !!(this.recorder() && this.transcriber());
   }
 
   startRecording() {
     this.cancelRecording();
+    if (process.platform === 'win32') return this.startWindowsRecording();
     const file = path.join(os.tmpdir(), `t3wow-dictation-${process.pid}-${Date.now()}.wav`);
     const [cmd, args] = this.recorder()(file);
     const child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -255,6 +282,18 @@ export class Voice {
     this.recording = null;
     this.dictating = false;
     if (!r) return;
+    if (process.platform === 'win32') {
+      if (r.stopping) {
+        r.controller.abort();
+        return r.stopping.catch(() => {});
+      }
+      r.child.stdin.end();
+      const timer = setTimeout(() => r.controller.abort(), 3000);
+      return r.closed.then(() => {
+        clearTimeout(timer);
+        return r.cleanup();
+      });
+    }
     try {
       r.child.kill('SIGINT');
     } catch {}
@@ -263,6 +302,7 @@ export class Voice {
 
   // Stop recording and resolve with the transcript ('' when nothing was said).
   async stopAndTranscribe() {
+    if (process.platform === 'win32') return this.stopWindowsRecording();
     const r = this.recording;
     this.recording = null;
     this.dictating = false;
@@ -292,6 +332,72 @@ export class Voice {
       return text;
     } finally {
       fs.rm(r.file, { force: true }, () => {});
+    }
+  }
+
+  startWindowsRecording() {
+    const script = fs.readFileSync(new URL('./dictation-windows.ps1', import.meta.url), 'utf8');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 't3wow-dictation-'));
+    const file = path.join(dir, 'audio.wav');
+    const output = path.join(dir, 'transcript');
+    const cleanup = async () => {
+      await Promise.allSettled([file, `${output}.txt`].map((name) => fs.promises.rm(name, { force: true })));
+      await fs.promises.rmdir(dir).catch(() => {});
+    };
+    const controller = new AbortController();
+    const child = spawnWindowsPowerShell(script, {
+      env: { ...process.env, T3WOW_DICTATION_WAV: file },
+      stdio: ['pipe', 'ignore', 'pipe'], signal: controller.signal, timeout: 90000,
+    });
+    let error;
+    let stderr = '';
+    child.once('error', (err) => { error = err; });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-2048); });
+    child.stdin.on('error', () => {});
+    const closed = new Promise((resolve) => {
+      child.once('close', (code) => resolve(code === 0 ? null : new Error(
+        stderr.trim() || error?.message || 'Microphone recording stopped. Try a shorter recording.',
+      )));
+    });
+    this.recording = { child, closed, controller, file, output, cleanup };
+    this.dictating = true;
+    return true;
+  }
+
+  async stopWindowsRecording() {
+    const r = this.recording;
+    if (!r || r.stopping) throw new Error('not recording');
+    this.dictating = false;
+    r.stopping = this.transcribeWindowsRecording(r);
+    return r.stopping;
+  }
+
+  async transcribeWindowsRecording(r) {
+    try {
+      r.child.stdin.end('stop\n');
+      const error = await r.closed;
+      if (error) throw error;
+      r.controller.signal.throwIfAborted();
+      if ((await fs.promises.stat(r.file)).size < 3200) return '';
+      const cli = path.join(this.whisperDir, 'whisper-cli.exe');
+      const args = ['--model', path.join(this.whisperDir, WINDOWS_MODEL), '--language', 'auto',
+        '--no-gpu', '--output-txt', '--output-file', r.output, '--file', r.file];
+      const env = { ...process.env };
+      delete env.T3_TOKEN;
+      await new Promise((resolve, reject) => {
+        let failure;
+        const child = execFile(cli, args, { env, windowsHide: true, timeout: 60000, signal: r.controller.signal }, (err, _stdout, stderr) => {
+          if (!err) return;
+          const details = stderr.trim().split(/\r?\n/).pop() || err.message.split(/\r?\n/)[0];
+          failure = new Error(`whisper.cpp failed: ${details}`);
+        });
+        child.once('close', () => failure ? reject(failure) : resolve());
+      });
+      return (await fs.promises.readFile(`${r.output}.txt`, 'utf8')).replace(/\s+/g, ' ').trim();
+    } finally {
+      if (this.recording === r) this.recording = null;
+      await r.cleanup();
     }
   }
 }

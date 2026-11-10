@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('menu', 'install', 'start', 'status', 'probe', 'uninstall')]
+    [ValidateSet('menu', 'install', 'start', 'status', 'probe', 'uninstall', 'dictation')]
     [string] $Action = 'menu',
     [string] $WowPath
 )
@@ -146,6 +146,7 @@ function Invoke-Action([string] $Selected) {
         switch ($Selected) {
             'install' { Install-Addon }
             'start' { Start-Bridge }
+            'dictation' { & (Join-Path $PSScriptRoot 'install-dictation.ps1') -StateHome $env:XDG_STATE_HOME }
             'uninstall' {
                 if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) { throw 'No installation is recorded for this launcher.' }
                 & $node $bridge uninstall
@@ -171,10 +172,10 @@ try {
         exit $LASTEXITCODE
     }
 
-    $choices = @{ '1' = 'install'; '2' = 'start'; '3' = 'status'; '4' = 'uninstall' }
+    $choices = @{ '1' = 'install'; '2' = 'start'; '3' = 'status'; '4' = 'uninstall'; '5' = 'dictation' }
     while ($true) {
         Write-Host "`nT3 Code for WoW"
-        Write-Host "1. Install or update`n2. Start bridge`n3. Status`n4. Uninstall`nQ. Quit"
+        Write-Host "1. Install or update`n2. Start bridge`n3. Status`n4. Uninstall`n5. Install dictation`nQ. Quit"
         $default = if (Test-Path -LiteralPath $configFile -PathType Leaf) { '2' } else { '1' }
         $choice = (Read-Host "Choose an action [Enter for $default]").Trim()
         if ($choice -eq 'q') { exit 0 }

@@ -8,6 +8,10 @@ import { createInterface } from 'node:readline';
 const POWERSHELL = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const POWERSHELL_ARGS = ['-NoLogo', '-NoProfile', '-NonInteractive'];
 
+export function spawnWindowsPowerShell(script, options) {
+  return spawn(POWERSHELL, [...POWERSHELL_ARGS, '-Command', script], { ...options, windowsHide: true });
+}
+
 export function findWindowsWowProcesses() {
   try {
     const script = String.raw`
@@ -41,8 +45,8 @@ export class WindowsCapture {
 
   start() {
     const script = fs.readFileSync(new URL('./capture-windows.ps1', import.meta.url), 'utf8');
-    const child = spawn(POWERSHELL, [...POWERSHELL_ARGS, '-Command', script], {
-      windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+    const child = spawnWindowsPowerShell(script, {
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child = child;
     let stderr = '';
